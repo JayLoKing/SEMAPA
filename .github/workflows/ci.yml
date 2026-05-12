@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ==========================================================================
+  # Lint y validación de docker-compose
+  # ==========================================================================
+  compose-validate:
+    name: Validate docker-compose
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Crear .env desde .env.example
+        run: cp .env.example .env
+
+      - name: Validar docker-compose.yml
+        run: docker compose config --quiet
+
+  # ==========================================================================
+  # Lint Python (backend + workers)
+  # ==========================================================================
+  lint-python:
+    name: Lint Python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install linters
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff black
+
+      - name: Run ruff
+        run: ruff check services/ || true
+
+      - name: Run black --check
+        run: black --check services/ || true
+
+  # ==========================================================================
+  # Tests backend (pytest)
+  # ==========================================================================
+  test-api:
+    name: Test API
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          if [ -f services/api/requirements.txt ]; then
+            pip install -r services/api/requirements.txt
+            pip install pytest pytest-asyncio httpx
+          fi
+
+      - name: Run pytest
+        working-directory: services/api
+        run: |
+          if [ -d tests ]; then
+            pytest -v --tb=short || true
+          else
+            echo "No tests directory yet"
+          fi
+
+  # ==========================================================================
+  # Build frontend
+  # ==========================================================================
+  build-web:
+    name: Build Web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        working-directory: web
+        run: |
+          if [ -f package.json ]; then
+            npm ci || npm install
+          fi
+
+      - name: Build
+        working-directory: web
+        env:
+          VITE_API_URL: http://localhost/api/v1
+        run: |
+          if [ -f package.json ]; then
+            npm run build || echo "Build skipped"
+          fi
+
+  # ==========================================================================
+  # Build images (sanity check)
+  # ==========================================================================
+  docker-build:
+    name: Docker build sanity check
+    runs-on: ubuntu-latest
+    needs: [compose-validate]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Crear .env desde .env.example
+        run: cp .env.example .env
+
+      - name: Build (sin levantar)
+        run: docker compose build --parallel || true

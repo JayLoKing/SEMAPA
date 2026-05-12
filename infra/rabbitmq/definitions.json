@@ -1,0 +1,111 @@
+{
+  "rabbit_version": "3.13.0",
+  "users": [
+    {
+      "name": "semapa",
+      "password": "semapa",
+      "tags": "administrator"
+    }
+  ],
+  "vhosts": [
+    {
+      "name": "/"
+    }
+  ],
+  "permissions": [
+    {
+      "user": "semapa",
+      "vhost": "/",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    }
+  ],
+  "exchanges": [
+    {
+      "name": "semapa.notifications",
+      "vhost": "/",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false
+    },
+    {
+      "name": "semapa.notifications.dlx",
+      "vhost": "/",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false
+    }
+  ],
+  "queues": [
+    {
+      "name": "notify.email",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-dead-letter-exchange": "semapa.notifications.dlx"
+      }
+    },
+    {
+      "name": "notify.sms",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-dead-letter-exchange": "semapa.notifications.dlx"
+      }
+    },
+    {
+      "name": "notify.whatsapp",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-dead-letter-exchange": "semapa.notifications.dlx"
+      }
+    },
+    {
+      "name": "notify.dlq",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false
+    }
+  ],
+  "bindings": [
+    {
+      "source": "semapa.notifications",
+      "vhost": "/",
+      "destination": "notify.email",
+      "destination_type": "queue",
+      "routing_key": "notify.email",
+      "arguments": {}
+    },
+    {
+      "source": "semapa.notifications",
+      "vhost": "/",
+      "destination": "notify.sms",
+      "destination_type": "queue",
+      "routing_key": "notify.sms",
+      "arguments": {}
+    },
+    {
+      "source": "semapa.notifications",
+      "vhost": "/",
+      "destination": "notify.whatsapp",
+      "destination_type": "queue",
+      "routing_key": "notify.whatsapp",
+      "arguments": {}
+    },
+    {
+      "source": "semapa.notifications.dlx",
+      "vhost": "/",
+      "destination": "notify.dlq",
+      "destination_type": "queue",
+      "routing_key": "#",
+      "arguments": {}
+    }
+  ]
+}

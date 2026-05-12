@@ -1,0 +1,264 @@
+# ============================================================================
+# SEMAPA - .gitignore raíz
+# ============================================================================
+
+# === Sistema Operativo ===
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+
+# === Editores e IDEs ===
+.vscode/
+!.vscode/settings.json.example
+!.vscode/extensions.json
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.iml
+.project
+.classpath
+.settings/
+
+# ============================================================================
+# Variables de entorno y secretos (NUNCA SUBIR)
+# ============================================================================
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.test
+!.env.example
+*.pem
+*.key
+*.cert
+*.crt
+secrets/
+credentials/
+private/
+
+# ============================================================================
+# Python
+# ============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Entornos virtuales Python
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.python-version
+pyvenv.cfg
+
+# Testing y coverage Python
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+nosetests.xml
+
+# Type checkers
+.mypy_cache/
+.pyre/
+.pytype/
+.dmypy.json
+dmypy.json
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# ============================================================================
+# Node.js / JavaScript / TypeScript
+# ============================================================================
+node_modules/
+.pnpm-store/
+.yarn/
+.yarn-integrity
+.npm
+.eslintcache
+.stylelintcache
+*.tsbuildinfo
+
+# Logs npm/yarn/pnpm
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Builds frontend
+dist/
+build/
+out/
+.next/
+.nuxt/
+.vuepress/dist
+.svelte-kit/
+
+# Vite
+.vite/
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# Cache de bundlers
+.cache/
+.parcel-cache/
+.turbo/
+
+# Testing JS
+coverage/
+.nyc_output/
+*.lcov
+
+# ============================================================================
+# React Native / Expo
+# ============================================================================
+.expo/
+.expo-shared/
+web-build/
+expo-env.d.ts
+
+# iOS
+mobile/ios/Pods/
+mobile/ios/build/
+mobile/ios/Podfile.lock
+*.xcworkspace
+!default.xcworkspace
+xcuserdata/
+DerivedData/
+
+# Android
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/app/build/
+mobile/android/local.properties
+mobile/android/captures/
+*.keystore
+!debug.keystore
+
+# Build outputs móvil
+*.apk
+*.aab
+*.ipa
+*.dSYM.zip
+
+# Metro
+.metro-health-check*
+
+# ============================================================================
+# Docker
+# ============================================================================
+*.log
+.docker/
+docker-volumes/
+
+# ============================================================================
+# Datos generados (no se versionan)
+# ============================================================================
+data/generated/
+data/output/
+lora-data/**
+!lora-data/.gitkeep
+*.csv.bak
+*.csv.tmp
+*.sqlite
+*.sqlite3
+*.db
+
+# === Cassandra data persistente ===
+infra/cassandra/data/
+infra/cassandra/logs/
+infra/cassandra/commitlog/
+
+# === RabbitMQ data ===
+infra/rabbitmq/data/
+
+# === Redis data ===
+infra/redis/data/
+dump.rdb
+
+# ============================================================================
+# PDFs generados
+# ============================================================================
+services/pdf-service/output/
+services/pdf-service/temp/
+*.pdf
+!docs/**/*.pdf
+!docs/img/samples/*.pdf
+
+# ============================================================================
+# Logs y temporales
+# ============================================================================
+logs/
+*.log
+*.log.*
+*.tmp
+*.bak
+*.old
+*.orig
+.tmp/
+
+# ============================================================================
+# Backups y archivos comprimidos accidentales
+# ============================================================================
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+!docs/**/*.zip
+
+# ============================================================================
+# Reportes de testing
+# ============================================================================
+test-results/
+playwright-report/
+playwright/.cache/
+
+# ============================================================================
+# Misc
+# ============================================================================
+.history/
+.firebase/
+.vercel/
+.netlify/
+.serverless/

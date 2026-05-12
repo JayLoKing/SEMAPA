@@ -1,0 +1,373 @@
+# ============================================================================
+# SEMAPA - Docker Compose
+# Levanta el stack completo: Cassandra cluster + Redis + RabbitMQ +
+# Backend API + Workers + Frontend + Nginx + Mailhog
+# ============================================================================
+
+name: semapa
+
+networks:
+  semapa-net:
+    driver: bridge
+
+volumes:
+  cassandra-1-data:
+  cassandra-2-data:
+  rabbitmq-data:
+  redis-data:
+  lora-data:
+
+services:
+
+  # ==========================================================================
+  # CASSANDRA CLUSTER (2 nodos)
+  # ==========================================================================
+  cassandra-1:
+    image: cassandra:4.1
+    container_name: semapa-cassandra-1
+    hostname: cassandra-1
+    restart: unless-stopped
+    environment:
+      - CASSANDRA_CLUSTER_NAME=SemapaCluster
+      - CASSANDRA_SEEDS=cassandra-1
+      - CASSANDRA_DC=datacenter1
+      - CASSANDRA_RACK=rack1
+      - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
+      - MAX_HEAP_SIZE=1G
+      - HEAP_NEWSIZE=200M
+    ports:
+      - "9042:9042"
+    volumes:
+      - cassandra-1-data:/var/lib/cassandra
+    networks:
+      - semapa-net
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'describe cluster' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+
+  cassandra-2:
+    image: cassandra:4.1
+    container_name: semapa-cassandra-2
+    hostname: cassandra-2
+    restart: unless-stopped
+    environment:
+      - CASSANDRA_CLUSTER_NAME=SemapaCluster
+      - CASSANDRA_SEEDS=cassandra-1
+      - CASSANDRA_DC=datacenter1
+      - CASSANDRA_RACK=rack1
+      - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
+      - MAX_HEAP_SIZE=1G
+      - HEAP_NEWSIZE=200M
+    volumes:
+      - cassandra-2-data:/var/lib/cassandra
+    networks:
+      - semapa-net
+    depends_on:
+      cassandra-1:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'describe cluster' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+
+  # ==========================================================================
+  # CASSANDRA SCHEMA INIT (one-shot)
+  # ==========================================================================
+  cassandra-init:
+    image: cassandra:4.1
+    container_name: semapa-cassandra-init
+    depends_on:
+      cassandra-1:
+        condition: service_healthy
+      cassandra-2:
+        condition: service_healthy
+    volumes:
+      - ./infra/cassandra/init:/init:ro
+    networks:
+      - semapa-net
+    command: >
+      bash -c "
+        echo 'Esperando 15s adicionales para estabilizar el cluster...';
+        sleep 15;
+        echo 'Aplicando schema...';
+        cqlsh cassandra-1 -f /init/01_keyspace.cql &&
+        cqlsh cassandra-1 -f /init/02_tables.cql &&
+        cqlsh cassandra-1 -f /init/03_indexes.cql &&
+        echo 'Schema aplicado correctamente.'
+      "
+    restart: "no"
+
+  # ==========================================================================
+  # REDIS (cache y deduplicación)
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: semapa-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - semapa-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================================================
+  # RABBITMQ (notificaciones)
+  # ==========================================================================
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: semapa-rabbitmq
+    restart: unless-stopped
+    environment:
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_USER:-semapa}
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASSWORD:-semapa}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+      - ./infra/rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
+      - ./infra/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+    networks:
+      - semapa-net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================================================
+  # MAILHOG (SMTP de pruebas, UI en :8025)
+  # ==========================================================================
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: semapa-mailhog
+    restart: unless-stopped
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    networks:
+      - semapa-net
+
+  # ==========================================================================
+  # BACKEND API (2 réplicas con load balance via Nginx)
+  # ==========================================================================
+  api-1:
+    build:
+      context: ./services/api
+      dockerfile: Dockerfile
+    container_name: semapa-api-1
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - INSTANCE_ID=api-1
+    networks:
+      - semapa-net
+    depends_on:
+      cassandra-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  api-2:
+    build:
+      context: ./services/api
+      dockerfile: Dockerfile
+    container_name: semapa-api-2
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - INSTANCE_ID=api-2
+    networks:
+      - semapa-net
+    depends_on:
+      cassandra-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # ==========================================================================
+  # SEEDER (one-shot, se ejecuta con: docker compose run seeder)
+  # ==========================================================================
+  seeder:
+    build:
+      context: ./services/seeder
+      dockerfile: Dockerfile
+    container_name: semapa-seeder
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data
+    networks:
+      - semapa-net
+    depends_on:
+      cassandra-init:
+        condition: service_completed_successfully
+    profiles:
+      - tools
+
+  # ==========================================================================
+  # SIMULATOR LoRaWAN (generador de archivos .txt)
+  # ==========================================================================
+  simulator:
+    build:
+      context: ./services/simulator
+      dockerfile: Dockerfile
+    container_name: semapa-simulator
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - lora-data:/lora-data
+    networks:
+      - semapa-net
+    depends_on:
+      - api-1
+
+  # ==========================================================================
+  # INGESTOR (watcher de carpeta /lora-data → Cassandra)
+  # ==========================================================================
+  ingestor:
+    build:
+      context: ./services/ingestor
+      dockerfile: Dockerfile
+    container_name: semapa-ingestor
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - lora-data:/lora-data
+    networks:
+      - semapa-net
+    depends_on:
+      cassandra-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  # ==========================================================================
+  # PDF SERVICE
+  # ==========================================================================
+  pdf-service:
+    build:
+      context: ./services/pdf-service
+      dockerfile: Dockerfile
+    container_name: semapa-pdf-service
+    restart: unless-stopped
+    env_file:
+      - .env
+    networks:
+      - semapa-net
+    depends_on:
+      cassandra-init:
+        condition: service_completed_successfully
+
+  # ==========================================================================
+  # WORKERS DE NOTIFICACIÓN
+  # ==========================================================================
+  worker-email:
+    build:
+      context: ./services/worker-email
+      dockerfile: Dockerfile
+    container_name: semapa-worker-email
+    restart: unless-stopped
+    env_file:
+      - .env
+    networks:
+      - semapa-net
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      mailhog:
+        condition: service_started
+      pdf-service:
+        condition: service_started
+
+  worker-sms:
+    build:
+      context: ./services/worker-sms
+      dockerfile: Dockerfile
+    container_name: semapa-worker-sms
+    restart: unless-stopped
+    env_file:
+      - .env
+    networks:
+      - semapa-net
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  worker-whatsapp:
+    build:
+      context: ./services/worker-whatsapp
+      dockerfile: Dockerfile
+    container_name: semapa-worker-whatsapp
+    restart: unless-stopped
+    env_file:
+      - .env
+    networks:
+      - semapa-net
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  # ==========================================================================
+  # FRONTEND WEB (React + Vite, servido por nginx interno)
+  # ==========================================================================
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        - VITE_API_URL=${VITE_API_URL:-http://localhost/api/v1}
+    container_name: semapa-web
+    restart: unless-stopped
+    networks:
+      - semapa-net
+
+  # ==========================================================================
+  # NGINX (reverse proxy + load balancer)
+  # ==========================================================================
+  nginx:
+    image: nginx:alpine
+    container_name: semapa-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - semapa-net
+    depends_on:
+      - api-1
+      - api-2
+      - web
+      - pdf-service
