@@ -249,12 +249,15 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    ports:
+      - "8002:8002"
     volumes:
       - lora-data:/lora-data
     networks:
       - semapa-net
     depends_on:
-      - api-1
+      cassandra-init:
+        condition: service_completed_successfully
 
   # ==========================================================================
   # INGESTOR (watcher de carpeta /lora-data → Cassandra)
@@ -267,6 +270,8 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    ports:
+      - "8003:8003"
     volumes:
       - lora-data:/lora-data
     networks:

@@ -96,7 +96,38 @@ SELECT COUNT(*) FROM semapa.infraestructuras;
 
 ## Fase 4 — Backend API
 
-**Estado:** ⏳ Pendiente (estructura base + `/health` listos)
+**Estado:** ✅ Código completado. Build Docker validado. Tests verde.
+
+**Archivos:**
+- `app/core/cassandra_client.py` — singleton + `TokenAwarePolicy(DCAwareRoundRobinPolicy)` +
+  prepared statements + perfil `analytics` (CL=ONE) para queries pesadas
+- `app/core/redis_client.py` — cache + rate-limit
+- `app/core/security.py` — JWT (PyJWT), bcrypt, OAuth2 bearer, `require_roles()`
+- `app/core/middleware.py` — JSON logs + rate-limit 200/min/IP
+- `app/services/usd_service.py` — cotización USD→BOB con cache Redis (TTL 15 min)
+- `app/services/tarifa_service.py` — cálculo de tarifas (ver Fase 10)
+- Routers: `auth`, `dashboard`, `consultas` (26 endpoints), `facturas`,
+  `notify` (RabbitMQ), `usd`, `buscar`, `lecturas` (móvil)
+
+**Endpoints:** 38 rutas totales (incl. Swagger, `/health`).
+
+**Verificación:**
+- `docker build ./services/api` ✅
+- Import & routing OK (38 paths registrados)
+- `pytest tests/` → 33 verde
+
+---
+
+## Fase 10 — Reglamento tarifario
+
+**Estado:** ✅ Completada.
+
+- 9 categorías + cargo fijo 12 m³ + 6 tramos progresivos
+- Reglas especiales Arts. 6, 7, 9, 10, 13, 14, 15, 16, 17, 18, 20, 21, 22, 24
+- Factor K (K1=1.00 .. K5=1.45)
+- Multa Bs 5 000 para K > K10
+- 31 tests unitarios cubriendo todas las reglas (`tests/test_tarifa.py`)
+- `docs/reglamento-tarifario.md` con resumen ejecutivo
 
 ---
 
@@ -129,10 +160,6 @@ SELECT COUNT(*) FROM semapa.infraestructuras;
 **Estado:** ⏳ Pendiente
 
 ---
-
-## Fase 10 — Reglamento tarifario
-
-**Estado:** ⏳ Pendiente
 
 ---
 
