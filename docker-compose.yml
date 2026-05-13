@@ -224,8 +224,12 @@ services:
     container_name: semapa-seeder
     env_file:
       - .env
+    environment:
+      - SEEDER_EXCEL=/recursos/recursos.xlsx
+      - SEEDS_DIR=/data/seeds
     volumes:
       - ./data:/data
+      - "./Recursos Practica 5.xlsx:/recursos/recursos.xlsx:ro"
     networks:
       - semapa-net
     depends_on:

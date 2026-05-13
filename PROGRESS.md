@@ -1,42 +1,39 @@
 # 📊 Progreso del Proyecto SEMAPA
 
-> Este archivo se actualiza al final de cada fase con: tareas completadas,
-> archivos creados, comandos de verificación y resultados.
+> Se actualiza al final de cada fase: tareas, archivos, verificación, resultados.
 
 ---
 
 ## Fase 0 — Repositorio y .gitignore
 
-**Estado:** ⏳ Pendiente
+**Estado:** ✅ Completada
 
-**Tareas:**
-- [ ] `git init` ejecutado
-- [ ] `.gitignore` raíz creado
-- [ ] `.dockerignore` en cada servicio
-- [ ] `.env.example` con todas las variables
-- [ ] `README.md` profesional
-- [ ] `LICENSE` (MIT)
-- [ ] `CONTRIBUTING.md`
-- [ ] `.github/workflows/ci.yml`
+- `git` inicializado
+- `.gitignore` raíz exhaustivo
+- `.dockerignore` por servicio (api, ingestor, pdf-service, seeder, simulator, workers, web)
+- `.env.example` con todas las variables
+- `README.md`, `LICENSE` (MIT), `CONTRIBUTING.md`
+- `.github/workflows/ci.yml`
 
-**Verificación:**
-```bash
-git status
-ls -la
-```
+**Verificación:** `git status` limpio.
 
 ---
 
 ## Fase 1 — Infraestructura y schema Cassandra
 
-**Estado:** ⏳ Pendiente
+**Estado:** ✅ Completada (código). Ejecución validada parcialmente: `docker compose config` OK.
 
-**Tareas:**
-- [ ] `docker-compose.yml` con cluster 2 nodos
-- [ ] Schema CQL aplicado
-- [ ] Healthchecks funcionando
+- `docker-compose.yml`: cluster Cassandra 2 nodos + Redis + RabbitMQ + Mailhog +
+  Nginx + 2 réplicas API + workers + pdf-service + web + seeder + simulator +
+  ingestor.
+- Schema CQL: keyspace (`SimpleStrategy` RF=2) + 16 tablas + índices secundarios.
+- `lecturas_por_medidor` con `LZ4Compressor` + `TimeWindowCompactionStrategy`
+  (ventana de 7 días) → particiones < 100 MB.
+- Nginx reverse proxy + `least_conn` load balancer + gzip + security headers.
+- RabbitMQ definitions: exchange topic `semapa.notifications` + DLQ.
 
-**Verificación:**
+**Verificación pendiente (ejecutar con Docker activo):**
+
 ```bash
 docker compose up -d
 docker exec semapa-cassandra-1 nodetool status
@@ -47,22 +44,47 @@ docker exec semapa-cassandra-1 cqlsh -e "USE semapa; DESCRIBE TABLES;"
 
 ## Fase 2 — Seeder
 
-**Estado:** ⏳ Pendiente
+**Estado:** ✅ Código completado. Build Docker validado. Ejecución contra cluster pendiente.
 
-**Tareas:**
-- [ ] CSVs derivados del Excel
-- [ ] 85.000 personas
-- [ ] 100.000 infraestructuras
-- [ ] 120.000 medidores
-- [ ] ~15M-21M lecturas
+**Archivos:**
+- `services/seeder/excel_loader.py` — parseo del Excel con forward-fill jerárquico,
+  DMS→decimal para gateways, mapeo categorías R1..S.
+- `services/seeder/cassandra_io.py` — cluster con `TokenAwarePolicy`
+  (`DCAwareRoundRobinPolicy`), `LOCAL_QUORUM`, prepared statements,
+  `execute_concurrent_with_args`.
+- `services/seeder/csv_writer.py` — CSVs derivados en `data/seeds/`.
+- `services/seeder/seed.py` — catálogos + 3 usuarios (bcrypt cost=12) + 85 000
+  personas (80k naturales + 5k jurídicas) + 100 000+ infraestructuras +
+  120 000 medidores con jitter de coordenadas, modelo según distribución, estado
+  95/3/2%, número de contrato secuencial, MAC y serie aleatorios.
+- `services/seeder/seed_lecturas.py` — time-series 2025-04-01..hoy, 3
+  lecturas/día por medidor, residenciales con bloques 0-1300/0-380/0-190 L,
+  acumulado monótono, 0.5 % errores (status 3..9), inserta en
+  `lecturas_por_medidor` + `lecturas_por_zona_dia`.
+- `services/seeder/Dockerfile` — multi-stage, `--prefix=/install` para
+  permisos correctos en `appuser`, `libev` para `cassandra-driver`.
+- `docker-compose.yml`: volumen `./Recursos Practica 5.xlsx:/recursos/recursos.xlsx:ro`.
 
-**Verificación:**
+**Verificación realizada:**
+- `docker compose config --quiet` ✅
+- `docker build ./services/seeder` ✅
+- `docker run … python -c "import seed, seed_lecturas, …"` ✅
+
+**Comandos para ejecutar con el cluster levantado:**
+
 ```bash
-docker exec semapa-cassandra-1 cqlsh -e "SELECT COUNT(*) FROM semapa.medidores;"
+docker compose --profile tools run --rm seeder python -u seed.py
+docker compose --profile tools run --rm seeder python -u seed_lecturas.py
+docker exec semapa-cassandra-1 cqlsh -e "
+SELECT COUNT(*) FROM semapa.personas;
+SELECT COUNT(*) FROM semapa.medidores;
+SELECT COUNT(*) FROM semapa.infraestructuras;
+"
 ```
 
-**Tiempos de ejecución:**
-- _Por completar_
+**Tiempos estimados:**
+- `seed.py`: 5–15 min
+- `seed_lecturas.py`: 30–60 min (`LECTURAS_CONCURRENCY=200`, `LECTURAS_BATCH=5000`)
 
 ---
 
@@ -74,7 +96,7 @@ docker exec semapa-cassandra-1 cqlsh -e "SELECT COUNT(*) FROM semapa.medidores;"
 
 ## Fase 4 — Backend API
 
-**Estado:** ⏳ Pendiente
+**Estado:** ⏳ Pendiente (estructura base + `/health` listos)
 
 ---
 
@@ -116,15 +138,17 @@ docker exec semapa-cassandra-1 cqlsh -e "SELECT COUNT(*) FROM semapa.medidores;"
 
 ## Checklist final
 
+- [x] Repositorio limpio
+- [x] `docker compose config` sin errores
 - [ ] `docker compose up -d` levanta todo
 - [ ] Cluster Cassandra 2 nodos UP
-- [ ] 120.000 medidores poblados
+- [ ] 120 000 medidores poblados
 - [ ] 25 consultas funcionando
 - [ ] Dashboard 3 roles funcional
 - [ ] PDFs generados (5 categorías)
 - [ ] Notificaciones funcionando
 - [ ] App móvil funcional
 - [ ] Reglamento tarifario implementado
-- [ ] Informe técnico listo (2 páginas)
+- [ ] Informe técnico listo
 - [ ] Glosario Cassandra completo
 - [ ] CI/CD pasando

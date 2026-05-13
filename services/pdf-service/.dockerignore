@@ -1,0 +1,10 @@
+.git
+.env
+*.md
+__pycache__/
+*.pyc
+venv/
+.venv/
+output/
+*.pdf
+*.log

@@ -1,0 +1,9 @@
+.git
+.env
+*.md
+__pycache__/
+*.pyc
+venv/
+.venv/
+*.log
+data/generated/

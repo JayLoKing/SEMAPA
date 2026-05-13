@@ -223,6 +223,10 @@ services/pdf-service/temp/
 *.pdf
 !docs/**/*.pdf
 !docs/img/samples/*.pdf
+!REGLAMENTO*.pdf
+
+# === Claude Code (workspace local) ===
+.claude/
 
 # ============================================================================
 # Logs y temporales
