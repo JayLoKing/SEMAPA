@@ -1,32 +1,39 @@
-"""
-SEMAPA - FastAPI main entry point.
+"""SEMAPA - FastAPI main entry point.
 
 Inicializa el cluster Cassandra como singleton, prepara statements,
 configura CORS, middlewares de logs y rutas.
 """
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
+from app.core.cassandra_client import cassandra_client
 from app.core.config import settings
-# from app.core.cassandra_client import cassandra_client
-# from app.core.redis_client import redis_client
-# from app.routers import auth, dashboard, consultas, facturas, notify, usd, buscar
+from app.core.middleware import JsonLogMiddleware, RateLimitMiddleware
+from app.core.redis_client import redis_client
+from app.routers import (auth, buscar, consultas, dashboard, facturas,
+                         lecturas, notify, usd)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Inicializa recursos al startup y los libera al shutdown."""
     logger.info("Iniciando SEMAPA API...")
-    # await cassandra_client.connect()
-    # await redis_client.connect()
-    # cassandra_client.prepare_statements()
+    try:
+        cassandra_client.connect()
+        cassandra_client.prepare_statements()
+    except Exception as e:
+        logger.error(f"Cassandra no disponible al startup: {e}")
+    try:
+        await redis_client.connect()
+    except Exception as e:
+        logger.error(f"Redis no disponible al startup: {e}")
     logger.info("SEMAPA API lista.")
     yield
     logger.info("Cerrando SEMAPA API...")
-    # await cassandra_client.close()
-    # await redis_client.close()
+    cassandra_client.close()
+    await redis_client.close()
 
 
 app = FastAPI(
@@ -46,19 +53,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(JsonLogMiddleware)
+app.add_middleware(RateLimitMiddleware, limit_per_min=200)
 
 
 @app.get("/health")
 async def health():
-    """Healthcheck endpoint."""
     return {"status": "ok", "service": "semapa-api"}
 
 
-# Routers - descomentar conforme se implementen
-# app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
-# app.include_router(dashboard.router, prefix="/api/v1/dashboard", tags=["dashboard"])
-# app.include_router(consultas.router, prefix="/api/v1/consultas", tags=["consultas"])
-# app.include_router(facturas.router, prefix="/api/v1/facturas", tags=["facturas"])
-# app.include_router(notify.router, prefix="/api/v1/notify", tags=["notify"])
-# app.include_router(usd.router, prefix="/api/v1/usd", tags=["usd"])
-# app.include_router(buscar.router, prefix="/api/v1/buscar", tags=["buscar"])
+app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
+app.include_router(dashboard.router, prefix="/api/v1/dashboard", tags=["dashboard"])
+app.include_router(consultas.router, prefix="/api/v1/consultas", tags=["consultas"])
+app.include_router(facturas.router, prefix="/api/v1/facturas", tags=["facturas"])
+app.include_router(notify.router, prefix="/api/v1/notify", tags=["notify"])
+app.include_router(usd.router, prefix="/api/v1/usd", tags=["usd"])
+app.include_router(buscar.router, prefix="/api/v1/buscar", tags=["buscar"])
+app.include_router(lecturas.router, prefix="/api/v1/lecturas", tags=["lecturas"])
