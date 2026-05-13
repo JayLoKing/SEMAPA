@@ -38,8 +38,9 @@ class Settings(BaseSettings):
     API_LOG_LEVEL: str = "INFO"
     API_CORS_ORIGINS: str = "http://localhost,http://localhost:5173"
 
-    # USD
-    USD_API_URL: str = "https://api.exchangerate.host/latest?base=USD&symbols=BOB"
+    # USD (apilayer.exchangerate.host)
+    USD_API_URL: str = "https://api.exchangerate.host/live?source=USD&currencies=BOB"
+    USD_API_KEY: str = ""
     USD_CACHE_TTL: int = 900
     USD_FALLBACK_RATE: float = 6.96
 

@@ -1,6 +1,18 @@
-"""SEMAPA — Worker WhatsApp (mock).
+"""SEMAPA — Worker WhatsApp (Twilio Sandbox).
 
-Consume `notify.whatsapp` desde RabbitMQ. Sin Meta Cloud API real; loguea.
+Consume `notify.whatsapp` desde RabbitMQ y envía vía Twilio WhatsApp Sandbox.
+
+Variables de entorno:
+  WHATSAPP_PROVIDER             twilio | mock  (default twilio)
+  TWILIO_ACCOUNT_SID            AC...
+  TWILIO_AUTH_TOKEN
+  TWILIO_WHATSAPP_FROM          whatsapp:+14155238886  (sandbox)
+  TWILIO_WHATSAPP_TEMPLATE_SID  HXxxxx (template para 24h+; opcional)
+
+Sandbox Twilio:
+  El destinatario debe haber enviado primero "join glass-fifty" al
+  +1 415 523 8886. Si está dentro de ventana 24h se envía como `body=`;
+  fuera de ventana solo templates pre-aprobados (`content_sid`).
 """
 from __future__ import annotations
 
@@ -13,6 +25,7 @@ from cassandra.auth import PlainTextAuthProvider
 from cassandra.cluster import Cluster
 from cassandra.query import dict_factory
 from loguru import logger
+from twilio.rest import Client as TwilioClient
 
 
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "rabbitmq")
@@ -28,6 +41,16 @@ CASSANDRA_PASSWORD = os.getenv("CASSANDRA_PASSWORD", "")
 
 QUEUE = "notify.whatsapp"
 MAX_RETRIES = 3
+
+WHATSAPP_PROVIDER = os.getenv("WHATSAPP_PROVIDER", "twilio").lower()
+TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
+TWILIO_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
+TWILIO_WA_FROM = os.getenv("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")
+TWILIO_WA_TEMPLATE = os.getenv("TWILIO_WHATSAPP_TEMPLATE_SID", "")
+
+_twilio: TwilioClient | None = None
+if WHATSAPP_PROVIDER == "twilio" and TWILIO_SID and TWILIO_TOKEN:
+    _twilio = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
 
 
 def connect_cassandra():
@@ -86,8 +109,39 @@ def load_data(session, contrato, periodo):
     return {"f": f[0], "tel": tel, "apellido": apellido}
 
 
+def _normalize_phone_e164(tel: str) -> str:
+    tel = tel.strip().replace(" ", "").replace("-", "")
+    if tel.startswith("+"):
+        return tel
+    if len(tel) == 8 and tel.isdigit():
+        return f"+591{tel}"
+    return f"+{tel}" if tel.isdigit() else tel
+
+
+def send_whatsapp_twilio(tel: str, body: str, content_vars: dict | None = None):
+    if _twilio is None:
+        raise RuntimeError("Twilio no configurado")
+    to = f"whatsapp:{_normalize_phone_e164(tel)}"
+    kwargs: dict = {"from_": TWILIO_WA_FROM, "to": to}
+    # Si hay template, usar content_sid (mandatorio fuera de ventana 24h).
+    if TWILIO_WA_TEMPLATE and content_vars is not None:
+        kwargs["content_sid"] = TWILIO_WA_TEMPLATE
+        kwargs["content_variables"] = json.dumps(content_vars)
+    else:
+        kwargs["body"] = body
+    msg = _twilio.messages.create(**kwargs)
+    logger.info(f"💬 WhatsApp Twilio sid={msg.sid} → {to}")
+
+
 def send_whatsapp_mock(tel: str, body: str):
-    logger.info(f"💬 WhatsApp → {tel}: {body}")
+    logger.info(f"💬 [MOCK] WhatsApp → {tel}: {body}")
+
+
+def send_whatsapp(tel: str, body: str, content_vars: dict | None = None):
+    if WHATSAPP_PROVIDER == "twilio":
+        send_whatsapp_twilio(tel, body, content_vars)
+    else:
+        send_whatsapp_mock(tel, body)
 
 
 def handle(session, msg: dict):
@@ -100,7 +154,9 @@ def handle(session, msg: dict):
     body = (f"SEMAPA — Hola Sr. {data['apellido']}. Recibo {msg['periodo']}: "
             f"Bs {data['f']['monto_bs']}. Consumo {data['f']['consumo_m3']} m³. "
             f"Gracias por su pago puntual.")
-    send_whatsapp_mock(data["tel"], body)
+    # Variables del template demo Twilio (HXb5b... = "Your appointment is on {{1}} at {{2}}")
+    content_vars = {"1": msg["periodo"], "2": f"Bs {data['f']['monto_bs']}"}
+    send_whatsapp(data["tel"], body, content_vars=content_vars)
 
 
 def main():

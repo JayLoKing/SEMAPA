@@ -3,13 +3,21 @@
 Consume `notify.email` desde RabbitMQ. Por cada mensaje:
   1. Resuelve persona+factura desde Cassandra (por contrato/carnet/mac).
   2. Pide los 2 PDFs (rollo + medicarta) al pdf-service.
-  3. Envía SMTP a Mailhog (dev) con los 2 adjuntos.
+  3. Envía via Mailtrap Sending API (o SMTP a Mailhog en dev) con los 2 PDFs.
 
 Reintentos exponenciales (3) y luego DLQ vía x-dead-letter-exchange.
+
+Variables de entorno:
+  EMAIL_PROVIDER          mailtrap | mailhog (default mailtrap)
+  MAILTRAP_TOKEN          Token de API Mailtrap
+  MAILTRAP_INBOX_ID       (vacío para sending real; con id usa Testing API)
+  SMTP_FROM               Email del remitente
+  SMTP_FROM_NAME          Nombre del remitente
+  SMTP_HOST/PORT          Para mailhog fallback
 """
 from __future__ import annotations
 
-import io
+import base64
 import json
 import os
 import smtplib
@@ -31,9 +39,15 @@ RABBITMQ_USER = os.getenv("RABBITMQ_USER", "semapa")
 RABBITMQ_PASSWORD = os.getenv("RABBITMQ_PASSWORD", "semapa")
 RABBITMQ_VHOST = os.getenv("RABBITMQ_VHOST", "/")
 
+EMAIL_PROVIDER = os.getenv("EMAIL_PROVIDER", "mailtrap").lower()
+SMTP_FROM = os.getenv("SMTP_FROM", "no-reply@demomailtrap.co")
+SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "SEMAPA")
+
+MAILTRAP_TOKEN = os.getenv("MAILTRAP_TOKEN", "")
+MAILTRAP_INBOX_ID = os.getenv("MAILTRAP_INBOX_ID", "")  # vacío = sending real
+
 SMTP_HOST = os.getenv("SMTP_HOST", "mailhog")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "1025"))
-SMTP_FROM = os.getenv("SMTP_FROM", "no-reply@semapa.bo")
 
 PDF_BASE = os.getenv("PDF_BASE_URL", "http://pdf-service:8001")
 
@@ -73,7 +87,6 @@ def resolve_contrato(session, identificador: str, valor: str) -> int | None:
         rows = list(session.execute("SELECT persona_id FROM personas WHERE documento = %s", (valor,)))
         if not rows:
             return None
-        # buscar primera infra del cliente con medidor
         infras = list(session.execute(
             "SELECT infraestructura_id FROM infraestructuras WHERE persona_id = %s",
             (rows[0]["persona_id"],),
@@ -131,8 +144,8 @@ def fetch_pdf(numero_contrato: int, periodo: str, formato: str) -> bytes:
     return r.content
 
 
-# --------------------- SMTP ---------------------
-def send_email(to: str, subject: str, body: str, attachments: list[tuple[str, bytes]]):
+# --------------------- Senders ---------------------
+def send_mailhog(to: str, subject: str, body: str, attachments: list[tuple[str, bytes]]):
     msg = EmailMessage()
     msg["From"] = SMTP_FROM
     msg["To"] = to
@@ -142,6 +155,50 @@ def send_email(to: str, subject: str, body: str, attachments: list[tuple[str, by
         msg.add_attachment(content, maintype="application", subtype="pdf", filename=fname)
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as s:
         s.send_message(msg)
+
+
+def send_mailtrap(to: str, subject: str, body: str, attachments: list[tuple[str, bytes]]):
+    """Mailtrap Sending API (POST https://send.api.mailtrap.io/api/send)."""
+    if not MAILTRAP_TOKEN:
+        raise RuntimeError("MAILTRAP_TOKEN no configurado")
+
+    base = "https://sandbox.api.mailtrap.io" if MAILTRAP_INBOX_ID else "https://send.api.mailtrap.io"
+    path = f"/api/send/{MAILTRAP_INBOX_ID}" if MAILTRAP_INBOX_ID else "/api/send"
+
+    payload = {
+        "from": {"email": SMTP_FROM, "name": SMTP_FROM_NAME},
+        "to": [{"email": to}],
+        "subject": subject,
+        "text": body,
+        "category": "SEMAPA Factura",
+        "attachments": [
+            {
+                "filename": fname,
+                "type": "application/pdf",
+                "disposition": "attachment",
+                "content": base64.b64encode(content).decode("ascii"),
+            }
+            for fname, content in attachments
+        ],
+    }
+    r = httpx.post(
+        f"{base}{path}",
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {MAILTRAP_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        timeout=15.0,
+    )
+    if r.status_code >= 300:
+        raise RuntimeError(f"Mailtrap fallo {r.status_code}: {r.text[:300]}")
+
+
+def send_email(to: str, subject: str, body: str, attachments: list[tuple[str, bytes]]):
+    if EMAIL_PROVIDER == "mailtrap":
+        send_mailtrap(to, subject, body, attachments)
+    else:
+        send_mailhog(to, subject, body, attachments)
 
 
 # --------------------- Handler ---------------------
@@ -171,12 +228,13 @@ def handle(session, message: dict):
          fetch_pdf(contrato, periodo, "rollo")),
     ]
     send_email(email, subject, body, pdfs)
-    logger.info(f"Email enviado → {email} ({contrato}/{periodo})")
+    logger.info(f"Email ({EMAIL_PROVIDER}) → {email} ({contrato}/{periodo})")
 
 
 # --------------------- Main loop ---------------------
 def main():
     cluster, session = connect_cassandra()
+    logger.info(f"Worker email iniciado (provider={EMAIL_PROVIDER})")
 
     while True:
         try:

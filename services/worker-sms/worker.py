@@ -1,7 +1,17 @@
-"""SEMAPA — Worker SMS (mock).
+"""SEMAPA — Worker SMS (Twilio).
 
-Consume `notify.sms` desde RabbitMQ, resuelve datos y simula envío de SMS
-(loguea). Sin proveedor real (Twilio sería el target en prod).
+Consume `notify.sms` desde RabbitMQ y envía vía Twilio SMS API.
+
+Variables de entorno:
+  SMS_PROVIDER                 twilio | mock  (default twilio)
+  TWILIO_ACCOUNT_SID           AC...
+  TWILIO_AUTH_TOKEN
+  TWILIO_MESSAGING_SERVICE_SID MG... (preferido sobre TWILIO_SMS_FROM)
+  TWILIO_SMS_FROM              +1XXXXXXXXXX (fallback)
+
+Nota Twilio trial:
+  - Los receptores deben estar verificados en la consola.
+  - Máximo 5 pre-verified recipients.
 """
 from __future__ import annotations
 
@@ -14,6 +24,7 @@ from cassandra.auth import PlainTextAuthProvider
 from cassandra.cluster import Cluster
 from cassandra.query import dict_factory
 from loguru import logger
+from twilio.rest import Client as TwilioClient
 
 
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "rabbitmq")
@@ -29,6 +40,16 @@ CASSANDRA_PASSWORD = os.getenv("CASSANDRA_PASSWORD", "")
 
 QUEUE = "notify.sms"
 MAX_RETRIES = 3
+
+SMS_PROVIDER = os.getenv("SMS_PROVIDER", "twilio").lower()
+TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
+TWILIO_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
+TWILIO_MSG_SVC = os.getenv("TWILIO_MESSAGING_SERVICE_SID", "")
+TWILIO_FROM = os.getenv("TWILIO_SMS_FROM", "")
+
+_twilio: TwilioClient | None = None
+if SMS_PROVIDER == "twilio" and TWILIO_SID and TWILIO_TOKEN:
+    _twilio = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
 
 
 def connect_cassandra():
@@ -88,8 +109,40 @@ def load_data(session, contrato, periodo):
     return {"factura": factura[0], "telefono": telefono, "apellido": apellido}
 
 
+def _normalize_phone_e164(tel: str) -> str:
+    """Convierte teléfono boliviano a E.164 (+591XXXXXXXX)."""
+    tel = tel.strip().replace(" ", "").replace("-", "")
+    if tel.startswith("+"):
+        return tel
+    if len(tel) == 8 and tel.isdigit():
+        return f"+591{tel}"
+    return f"+{tel}" if tel.isdigit() else tel
+
+
+def send_sms_twilio(telefono: str, body: str):
+    if _twilio is None:
+        raise RuntimeError("Twilio no configurado (revisa TWILIO_ACCOUNT_SID / AUTH_TOKEN)")
+    to = _normalize_phone_e164(telefono)
+    kwargs: dict = {"to": to, "body": body}
+    if TWILIO_MSG_SVC:
+        kwargs["messaging_service_sid"] = TWILIO_MSG_SVC
+    elif TWILIO_FROM:
+        kwargs["from_"] = TWILIO_FROM
+    else:
+        raise RuntimeError("Falta TWILIO_MESSAGING_SERVICE_SID o TWILIO_SMS_FROM")
+    msg = _twilio.messages.create(**kwargs)
+    logger.info(f"📱 SMS Twilio sid={msg.sid} → {to}: {body[:60]}...")
+
+
 def send_sms_mock(telefono: str, body: str):
-    logger.info(f"📱 SMS → {telefono}: {body}")
+    logger.info(f"📱 [MOCK] SMS → {telefono}: {body}")
+
+
+def send_sms(telefono: str, body: str):
+    if SMS_PROVIDER == "twilio":
+        send_sms_twilio(telefono, body)
+    else:
+        send_sms_mock(telefono, body)
 
 
 def handle(session, message: dict):
@@ -103,7 +156,7 @@ def handle(session, message: dict):
         raise ValueError("Sin teléfono registrado")
     body = (f"SEMAPA: Sr. {data['apellido']} su recibo {message['periodo']} es "
             f"Bs {data['factura']['monto_bs']}. Consumo {data['factura']['consumo_m3']} m³.")
-    send_sms_mock(data["telefono"], body)
+    send_sms(data["telefono"], body)
 
 
 def main():
