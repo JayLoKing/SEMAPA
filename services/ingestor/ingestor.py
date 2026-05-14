@@ -51,12 +51,15 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 
 
 # ---------------------- metrics ----------------------
+ANOMALY_THRESHOLD = int(os.getenv("ANOMALY_THRESHOLD_LITROS", "50000"))  # 50m³ salto = anomalía
+
 METRICS = {
     "files_processed": 0,
     "rows_inserted": 0,
     "duplicates_skipped": 0,
     "errors": 0,
     "parse_errors": 0,
+    "anomalies_detected": 0,
     "started_at": datetime.utcnow().isoformat() + "Z",
 }
 
@@ -163,8 +166,30 @@ def process_file(path: Path) -> None:
         medidor_id, dist_id, zona_id, cat, gw = meta
         litros = int(lectura * 1000)
         anio_mes = ts.year * 100 + ts.month
-        rows_med.append((medidor_id, anio_mes, ts, gw or antena, litros, 0, status))
-        rows_zona.append((dist_id, zona_id, ts.date(), ts.hour, medidor_id, 0, cat))
+
+        # ---- Consumo diferencial + detección de anomalías ----
+        last_key = f"last_lectura:{mac}"
+        consumo = 0
+        flag_status = status  # 1=OK, 2=Manual, 3..9=errores
+        try:
+            last_val = State.redis.get(last_key)
+            if last_val is not None:
+                consumo = litros - int(last_val)
+                if consumo < 0:
+                    # Reseteo de medidor o lectura negativa (reemplaza contador)
+                    consumo = litros
+                    flag_status = 8  # RESET
+                    logger.warning(f"RESET medidor {mac}: delta={consumo}")
+                elif consumo > ANOMALY_THRESHOLD:
+                    flag_status = 9  # ANOMALIA: salto imposible
+                    METRICS["anomalies_detected"] += 1
+                    logger.warning(f"ANOMALIA {mac}: consumo={consumo}L threshold={ANOMALY_THRESHOLD}L")
+            State.redis.set(last_key, litros)
+        except Exception as e:
+            logger.warning(f"Redis anomaly check falló: {e}")
+
+        rows_med.append((medidor_id, anio_mes, ts, gw or antena, litros, consumo, flag_status))
+        rows_zona.append((dist_id, zona_id, ts.date(), ts.hour, medidor_id, consumo, cat))
         rows_raw.append((gw or antena, ts.date(), ts, mac, raw_line, True, None))
 
     if rows_med:

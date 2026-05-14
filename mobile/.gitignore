@@ -15,4 +15,3 @@ npm-debug.*
 *.ipa
 .env
 .env.local
-expo-env.d.ts

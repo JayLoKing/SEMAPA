@@ -1,0 +1,10 @@
+codigo,descripcion
+1,Automatico (Bien)
+2,Manual
+3,Falla en la alimentación eléctrica
+4,Fallo en la conectividad de red
+5,Configuración incorrecta del sensor o gateway
+6,Obstrucción o daño en el caudalímetro
+7,Problemas de firmware o software embebido
+8,Error en el backend o plataforma IoT
+9,Desincronización de reloj (timestamp incorrecto)

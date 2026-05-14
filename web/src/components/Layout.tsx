@@ -1,6 +1,6 @@
 import { Link, Outlet, useNavigate } from "react-router-dom";
 import { useAuthStore } from "../store/auth";
-import { Droplet, Gauge, LayoutDashboard, Map, Receipt, LogOut, Search } from "lucide-react";
+import { Droplet, Gauge, LayoutDashboard, Map, Receipt, LogOut, Search, AlertTriangle, Monitor } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api/client";
 
@@ -36,6 +36,17 @@ export default function Layout() {
           <Link className="flex gap-2 items-center py-2 px-3 rounded hover:bg-semapa-700" to="/facturacion">
             <Receipt size={16} /> Facturación
           </Link>
+          <Link className="flex gap-2 items-center py-2 px-3 rounded hover:bg-semapa-700" to="/anomalias">
+            <AlertTriangle size={16} /> Anomalías
+          </Link>
+          <a
+            href="/kiosk"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex gap-2 items-center py-2 px-3 rounded hover:bg-semapa-700 text-semapa-200"
+          >
+            <Monitor size={16} /> Autoservicio ↗
+          </a>
         </nav>
         <div className="mt-auto pt-4 border-t border-semapa-700 text-xs">
           <div className="font-semibold">{nombre}</div>
