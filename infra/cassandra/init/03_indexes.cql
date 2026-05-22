@@ -1,27 +1,27 @@
 -- ============================================================================
--- SEMAPA - Índices secundarios
+-- SEMAPA - Índices secundarios (modelo MAC-céntrico)
 -- Usar con moderación: en Cassandra los índices son costosos.
--- Solo se crean los estrictamente necesarios para el buscador y filtros.
 -- ============================================================================
 
 USE semapa;
 
--- Para búsqueda por documento (CI/NIT)
-CREATE INDEX IF NOT EXISTS idx_personas_documento ON personas (documento);
-
--- Para búsqueda en infraestructuras
-CREATE INDEX IF NOT EXISTS idx_infra_persona ON infraestructuras (persona_id);
+-- Infraestructuras
 CREATE INDEX IF NOT EXISTS idx_infra_distrito ON infraestructuras (distrito_id);
 
--- Para el buscador de medidores
-CREATE INDEX IF NOT EXISTS idx_medidor_mac ON medidores (mac);
+-- Medidores (mac es PK → no se indexa). Filtros del dashboard:
 CREATE INDEX IF NOT EXISTS idx_medidor_contrato ON medidores (numero_contrato);
-CREATE INDEX IF NOT EXISTS idx_medidor_serie ON medidores (numero_serie);
-CREATE INDEX IF NOT EXISTS idx_medidor_categoria ON medidores (categoria_tarifa);
+CREATE INDEX IF NOT EXISTS idx_medidor_catastro ON medidores (numero_catastro);
 CREATE INDEX IF NOT EXISTS idx_medidor_distrito ON medidores (distrito_id);
 CREATE INDEX IF NOT EXISTS idx_medidor_gateway ON medidores (gateway_id);
 CREATE INDEX IF NOT EXISTS idx_medidor_estado ON medidores (estado);
+CREATE INDEX IF NOT EXISTS idx_medidor_subcategoria ON medidores (subcategoria);
 
--- Para listar facturas por persona
-CREATE INDEX IF NOT EXISTS idx_factura_persona ON facturas (persona_id);
+-- Contratos: búsqueda por MAC y por catastro
+CREATE INDEX IF NOT EXISTS idx_contrato_mac ON contratos (medidor_iot);
+CREATE INDEX IF NOT EXISTS idx_contrato_catastro ON contratos (numero_catastro);
+
+-- Facturas: filtro por estado (morosos/pagadas)
 CREATE INDEX IF NOT EXISTS idx_factura_estado ON facturas (estado);
+
+-- Lecturas: filtro por status (anomalías) — partición grande, usar con LIMIT
+CREATE INDEX IF NOT EXISTS idx_lectura_status ON lecturas_por_medidor (status);

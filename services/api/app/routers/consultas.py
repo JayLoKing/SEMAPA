@@ -1,7 +1,9 @@
-"""Las 25 consultas del enunciado.
+"""Consultas analíticas (modelo MAC-céntrico, data real).
 
-Implementación con CL=ONE para analítica + cache Redis (TTL 60s) en las más
-pesadas para mantener latencia razonable contra el dataset masivo.
+CL=ONE para analítica + cache Redis (TTL configurable).
+Estados de medidor: Operativo|Reacondicionado|Nuevo (activos),
+Mantenimiento, Dañado (falla).
+Consumo en m³ (lecturas reales: LecturaActual - lecturaAnterior).
 """
 from __future__ import annotations
 
@@ -15,11 +17,18 @@ from fastapi import APIRouter, Depends, Query
 from app.core.cassandra_client import cassandra_client
 from app.core.redis_client import redis_client
 from app.core.security import current_user
+from app.services.clima_service import fetch_clima_mensual
 
 
 router = APIRouter()
 
-CACHE_TTL = 60  # segundos por defecto
+CACHE_TTL = 60
+
+# Estados de medidor reales
+ESTADOS_ACTIVOS = {"Operativo", "Reacondicionado", "Nuevo"}
+ESTADOS_FALLA = {"Dañado"}
+ESTADOS_MANTEN = {"Mantenimiento"}
+RESIDENCIALES = {"R1", "R2", "R3", "R4"}
 
 
 async def _cached(key: str, fn, ttl: int = CACHE_TTL):
@@ -31,97 +40,88 @@ async def _cached(key: str, fn, ttl: int = CACHE_TTL):
     return value
 
 
+def _es_activo(estado: str) -> bool:
+    return estado in ESTADOS_ACTIVOS
+
+
 # ----------------------------------------------------------------------------
-# 1. Consumo promedio por distrito en rango horario
+# 1. Consumo total por distrito (periodo)
 # ----------------------------------------------------------------------------
 @router.get("/consumo-promedio-distrito")
-async def consumo_promedio_distrito(
-    rango_horas: int = Query(8, ge=1, le=24),
-    fecha: date = Query(default_factory=date.today),
-    _u: dict = Depends(current_user),
-):
-    """Por cada distrito, promedio de consumo agregado en bloque horario."""
+async def consumo_promedio_distrito(_u: dict = Depends(current_user)):
     def _q():
         out: dict[int, dict[str, Any]] = defaultdict(lambda: {"total": 0, "n": 0})
         rows = cassandra_client.execute_raw(
-            "SELECT distrito_id, hora, consumo_litros FROM lecturas_por_zona_dia",
+            "SELECT distrito_id, consumo_m3 FROM lecturas_por_zona_periodo",
             profile="analytics",
         )
         for r in rows:
-            if r["hora"] >= rango_horas:
-                continue
-            out[r["distrito_id"]]["total"] += r["consumo_litros"]
+            out[r["distrito_id"]]["total"] += r["consumo_m3"] or 0
             out[r["distrito_id"]]["n"] += 1
         return [
-            {"distrito_id": d, "promedio_litros": round(v["total"] / v["n"], 2) if v["n"] else 0, "muestras": v["n"]}
+            {"distrito_id": d, "consumo_total_m3": v["total"],
+             "promedio_m3": round(v["total"] / v["n"], 2) if v["n"] else 0, "muestras": v["n"]}
             for d, v in sorted(out.items())
         ]
-    return await _cached(f"q:cpd:{rango_horas}:{fecha}", _q)
+    return await _cached("q:cpd", _q, ttl=120)
 
 
 # ----------------------------------------------------------------------------
-# 2. Comparativa semanas entre distritos
+# 2. Comparativa por periodo entre distritos
 # ----------------------------------------------------------------------------
 @router.get("/comparativa-semanas")
-async def comparativa_semanas(
-    distritos: str = Query("1,2,3"),
-    _u: dict = Depends(current_user),
-):
+async def comparativa_semanas(distritos: str = Query("1,3,5"), _u: dict = Depends(current_user)):
     ids = [int(x) for x in distritos.split(",") if x.strip().isdigit()]
     def _q():
-        weekly: dict[tuple[int, str], int] = defaultdict(int)
+        agg: dict[tuple[int, str], int] = defaultdict(int)
         rows = cassandra_client.execute_raw(
-            "SELECT distrito_id, fecha, consumo_litros FROM lecturas_por_zona_dia",
+            "SELECT distrito_id, periodo, consumo_m3 FROM lecturas_por_zona_periodo",
             profile="analytics",
         )
         for r in rows:
             if r["distrito_id"] not in ids:
                 continue
-            iso = r["fecha"].isocalendar()
-            wk = f"{iso[0]}-W{iso[1]:02d}"
-            weekly[(r["distrito_id"], wk)] += r["consumo_litros"]
+            agg[(r["distrito_id"], r["periodo"])] += r["consumo_m3"] or 0
         return [
-            {"distrito_id": d, "semana": w, "consumo_litros": v}
-            for (d, w), v in sorted(weekly.items())
+            {"distrito_id": d, "periodo": p, "consumo_m3": v}
+            for (d, p), v in sorted(agg.items())
         ]
     return await _cached(f"q:csem:{distritos}", _q)
 
 
 # ----------------------------------------------------------------------------
-# 3. Consumos excesivos (>30% sobre tope tarifa)
+# 3. Consumos excesivos (>150 m³ acumulado en el periodo)
 # ----------------------------------------------------------------------------
 @router.get("/consumos-excesivos")
-async def consumos_excesivos(umbral_pct: float = 0.30, _u: dict = Depends(current_user)):
+async def consumos_excesivos(umbral_m3: int = 150, _u: dict = Depends(current_user)):
     def _q():
-        # Umbral: 150 m³ mes → litros equivalentes
-        umbral_litros = 150 * 1000 * (1 + umbral_pct)
         agg: dict[str, int] = defaultdict(int)
         rows = cassandra_client.execute_raw(
-            "SELECT medidor_id, consumo_litros FROM lecturas_por_zona_dia",
-            profile="analytics",
+            "SELECT mac, consumo_m3 FROM lecturas_por_zona_periodo", profile="analytics",
         )
         for r in rows:
-            agg[str(r["medidor_id"])] += r["consumo_litros"]
+            agg[r["mac"]] += r["consumo_m3"] or 0
         return sorted(
-            [{"medidor_id": k, "consumo_litros": v}
-             for k, v in agg.items() if v > umbral_litros],
-            key=lambda x: -x["consumo_litros"],
+            [{"mac": k, "consumo_m3": v} for k, v in agg.items() if v > umbral_m3],
+            key=lambda x: -x["consumo_m3"],
         )[:200]
-    return await _cached(f"q:excesivos:{umbral_pct}", _q, ttl=120)
+    return await _cached(f"q:excesivos:{umbral_m3}", _q, ttl=120)
 
 
 # ----------------------------------------------------------------------------
-# 4. Medidores activos
-# 5. Medidores fuera de servicio
+# 4/5. Medidores por estado
 # ----------------------------------------------------------------------------
 @router.get("/medidores-activos")
 async def medidores_activos(_u: dict = Depends(current_user)):
     def _q():
-        rows = cassandra_client.execute_raw(
-            "SELECT estado FROM medidores", profile="analytics"
-        )
+        rows = cassandra_client.execute_raw("SELECT estado FROM medidores", profile="analytics")
         c = Counter(r["estado"] for r in rows)
-        return {"total": sum(c.values()), **dict(c)}
+        total = sum(c.values())
+        activos = sum(c.get(e, 0) for e in ESTADOS_ACTIVOS)
+        return {"total": total, "activos": activos,
+                "falla": sum(c.get(e, 0) for e in ESTADOS_FALLA),
+                "mantenimiento": sum(c.get(e, 0) for e in ESTADOS_MANTEN),
+                "por_estado": dict(c)}
     return await _cached("q:medidores_activos", _q, ttl=120)
 
 
@@ -129,10 +129,10 @@ async def medidores_activos(_u: dict = Depends(current_user)):
 async def medidores_fuera_servicio(_u: dict = Depends(current_user)):
     def _q():
         rows = cassandra_client.execute_raw(
-            "SELECT medidor_id, mac, distrito_id, zona_id FROM medidores WHERE estado='FUERA_SERVICIO' ALLOW FILTERING",
+            "SELECT mac, distrito_id, zona, estado FROM medidores WHERE estado='Dañado' ALLOW FILTERING",
             profile="analytics",
         )
-        return [{k: str(v) if hasattr(v, "hex") else v for k, v in r.items()} for r in rows][:500]
+        return [dict(r) for r in rows][:500]
     return await _cached("q:fuera_serv", _q, ttl=300)
 
 
@@ -142,15 +142,14 @@ async def medidores_fuera_servicio(_u: dict = Depends(current_user)):
 @router.get("/modelos-mas-fallas")
 async def modelos_mas_fallas(_u: dict = Depends(current_user)):
     def _q():
-        # Cruce simple: contar medidores en estado != ACTIVO por modelo.
         rows = cassandra_client.execute_raw(
-            "SELECT modelo_id, estado FROM medidores", profile="analytics"
-        )
+            "SELECT tipo_medidor_id, estado FROM medidores", profile="analytics")
         c: dict[int, dict[str, int]] = defaultdict(lambda: {"total": 0, "fallas": 0})
         for r in rows:
-            c[r["modelo_id"]]["total"] += 1
-            if r["estado"] != "ACTIVO":
-                c[r["modelo_id"]]["fallas"] += 1
+            mid = r["tipo_medidor_id"]
+            c[mid]["total"] += 1
+            if not _es_activo(r["estado"]):
+                c[mid]["fallas"] += 1
         return sorted(
             [{"modelo_id": k, **v, "tasa_falla": round(v["fallas"]/v["total"], 4) if v["total"] else 0}
              for k, v in c.items()],
@@ -167,13 +166,13 @@ async def consumo_por_tarifa_distrito(_u: dict = Depends(current_user)):
     def _q():
         agg: dict[tuple[int, str], int] = defaultdict(int)
         rows = cassandra_client.execute_raw(
-            "SELECT distrito_id, categoria_tarifa, consumo_litros FROM lecturas_por_zona_dia",
+            "SELECT distrito_id, subcategoria, consumo_m3 FROM lecturas_por_zona_periodo",
             profile="analytics",
         )
         for r in rows:
-            agg[(r["distrito_id"], r["categoria_tarifa"])] += r["consumo_litros"]
+            agg[(r["distrito_id"], r["subcategoria"] or "?")] += r["consumo_m3"] or 0
         return [
-            {"distrito_id": d, "categoria": c, "consumo_litros": v}
+            {"distrito_id": d, "categoria": c, "consumo_m3": v}
             for (d, c), v in sorted(agg.items())
         ]
     return await _cached("q:consumo_tarifa_distrito", _q, ttl=180)
@@ -185,33 +184,33 @@ async def consumo_por_tarifa_distrito(_u: dict = Depends(current_user)):
 @router.get("/zonas-anomalas")
 async def zonas_anomalas(_u: dict = Depends(current_user)):
     def _q():
-        agg: dict[tuple[int, int], int] = defaultdict(int)
+        agg: dict[tuple[int, str], int] = defaultdict(int)
         rows = cassandra_client.execute_raw(
-            "SELECT distrito_id, zona_id, consumo_litros FROM lecturas_por_zona_dia",
+            "SELECT distrito_id, zona, consumo_m3 FROM lecturas_por_zona_periodo",
             profile="analytics",
         )
         for r in rows:
-            agg[(r["distrito_id"], r["zona_id"])] += r["consumo_litros"]
+            agg[(r["distrito_id"], r["zona"] or "?")] += r["consumo_m3"] or 0
         return sorted(
-            [{"distrito_id": d, "zona_id": z, "consumo_litros": v}
-             for (d, z), v in agg.items()],
-            key=lambda x: -x["consumo_litros"],
+            [{"distrito_id": d, "zona": z, "consumo_m3": v} for (d, z), v in agg.items()],
+            key=lambda x: -x["consumo_m3"],
         )[:20]
     return await _cached("q:zonas_anomalas", _q, ttl=180)
 
 
 # ----------------------------------------------------------------------------
-# 9. Lecturas fallidas del mes (status != 1 y != 2)
+# 9. Lecturas fallidas (status >= 3)
 # ----------------------------------------------------------------------------
 @router.get("/lecturas-fallidas-mes")
-async def lecturas_fallidas_mes(_u: dict = Depends(current_user)):
+async def lecturas_fallidas_mes(limite: int = 5000, _u: dict = Depends(current_user)):
     def _q():
-        now = datetime.utcnow()
-        anio_mes = now.year * 100 + now.month
-        # Sin índice por status: contamos vía sampleo controlado en lecturas_por_medidor
-        # (placeholder: implementar materialized view en prod)
-        return {"anio_mes": anio_mes, "nota": "Métrica precalculada por job ETL nocturno"}
-    return _q()
+        rows = cassandra_client.execute_raw(
+            f"SELECT status FROM lecturas_por_medidor WHERE status >= 3 ALLOW FILTERING LIMIT {int(limite)}",
+            profile="analytics",
+        )
+        c = Counter(r["status"] for r in rows)
+        return {"total_fallidas": sum(c.values()), "por_status": dict(c)}
+    return await _cached("q:lecturas_fallidas", _q, ttl=180)
 
 
 # ----------------------------------------------------------------------------
@@ -222,39 +221,54 @@ async def medidores_mas_4_anios(_u: dict = Depends(current_user)):
     cutoff = date.today() - timedelta(days=365 * 4)
     def _q():
         rows = cassandra_client.execute_raw(
-            "SELECT medidor_id, fecha_instalacion FROM medidores",
-            profile="analytics",
-        )
-        antiguos = [r for r in rows if r["fecha_instalacion"] and r["fecha_instalacion"] < cutoff]
-        return {"total": len(antiguos), "cutoff": str(cutoff)}
+            "SELECT fecha_instalacion FROM medidores", profile="analytics")
+        antiguos = sum(1 for r in rows if r["fecha_instalacion"] and r["fecha_instalacion"] < cutoff)
+        return {"total": antiguos, "cutoff": str(cutoff)}
     return await _cached(f"q:antiguos:{cutoff}", _q, ttl=600)
 
 
 # ----------------------------------------------------------------------------
-# 11. Per cápita residencial
+# 11. Per cápita residencial (m³ y litros/día ONU)
 # ----------------------------------------------------------------------------
 @router.get("/per-capita-residencial")
 async def per_capita_residencial(_u: dict = Depends(current_user)):
     def _q():
-        rows = cassandra_client.execute_raw(
-            "SELECT distrito_id, habitantes FROM distritos", profile="analytics"
-        )
-        hab = {r["distrito_id"]: r["habitantes"] for r in rows}
+        hab = {r["distrito_id"]: r["habitantes"]
+               for r in cassandra_client.execute_raw("SELECT distrito_id, habitantes FROM distritos",
+                                                      profile="analytics")}
         agg: dict[int, int] = defaultdict(int)
         for r in cassandra_client.execute_raw(
-            "SELECT distrito_id, categoria_tarifa, consumo_litros FROM lecturas_por_zona_dia",
+            "SELECT distrito_id, subcategoria, consumo_m3 FROM lecturas_por_zona_periodo",
             profile="analytics",
         ):
-            if r["categoria_tarifa"] in ("R1", "R2", "R3", "R4"):
-                agg[r["distrito_id"]] += r["consumo_litros"]
-        return [
-            {"distrito_id": d,
-             "consumo_litros": agg[d],
-             "habitantes": hab.get(d, 0),
-             "per_capita_l": round(agg[d] / hab[d], 2) if hab.get(d) else 0}
-            for d in sorted(agg)
-        ]
+            if (r["subcategoria"] or "") in RESIDENCIALES:
+                agg[r["distrito_id"]] += r["consumo_m3"] or 0
+        out = []
+        for d in sorted(agg):
+            h = hab.get(d, 0)
+            m3 = agg[d]
+            # 3 meses de data → litros/día = m3*1000 / (90 días * habitantes)
+            lpd = round(m3 * 1000 / (90 * h), 1) if h else 0
+            out.append({"distrito_id": d, "consumo_m3": m3, "habitantes": h,
+                        "litros_persona_dia": lpd, "nivel_onu": _nivel_onu(lpd)})
+        return out
     return await _cached("q:percapita", _q, ttl=300)
+
+
+def _nivel_onu(lpd: float) -> dict:
+    """Clasifica litros/persona/día en los 6 niveles ONU."""
+    escalas = [
+        (100, 1, "Consumo ejemplar y consciente"),
+        (180, 2, "Consumo responsable"),
+        (250, 3, "Consumo moderado"),
+        (300, 4, "Consumo elevado"),
+        (400, 5, "Consumo inconsciente"),
+        (float("inf"), 6, "Consumo crítico e insostenible"),
+    ]
+    for tope, nivel, label in escalas:
+        if lpd <= tope:
+            return {"nivel": nivel, "clasificacion": label}
+    return {"nivel": 6, "clasificacion": "Consumo crítico e insostenible"}
 
 
 # ----------------------------------------------------------------------------
@@ -265,45 +279,40 @@ async def top3_consumidores_distrito(_u: dict = Depends(current_user)):
     def _q():
         agg: dict[tuple[int, str], int] = defaultdict(int)
         for r in cassandra_client.execute_raw(
-            "SELECT distrito_id, medidor_id, consumo_litros FROM lecturas_por_zona_dia",
+            "SELECT distrito_id, mac, consumo_m3 FROM lecturas_por_zona_periodo",
             profile="analytics",
         ):
-            agg[(r["distrito_id"], str(r["medidor_id"]))] += r["consumo_litros"]
-
+            agg[(r["distrito_id"], r["mac"])] += r["consumo_m3"] or 0
         por_distrito: dict[int, list[tuple[str, int]]] = defaultdict(list)
         for (d, m), v in agg.items():
             por_distrito[d].append((m, v))
-
         out = {}
         for d, items in por_distrito.items():
             items.sort(key=lambda x: -x[1])
-            out[d] = [{"medidor_id": m, "consumo_litros": v} for m, v in items[:3]]
+            out[d] = [{"mac": m, "consumo_m3": v} for m, v in items[:3]]
         return out
     return await _cached("q:top3", _q, ttl=300)
 
 
 # ----------------------------------------------------------------------------
-# 13. Zonas que requieren renovación (cobertura baja)
-# 14. Zonas con errores por distrito
-# 15. Cobertura de antenas
+# 13/14/15. Zonas renovación / errores / cobertura
 # ----------------------------------------------------------------------------
 @router.get("/zonas-renovacion")
 async def zonas_renovacion(_u: dict = Depends(current_user)):
     def _q():
         rows = cassandra_client.execute_raw(
-            "SELECT distrito_id, zona_id, medidor_id, estado FROM medidores",
-            profile="analytics",
-        )
-        zonas: dict[tuple[int, int], dict[str, int]] = defaultdict(lambda: {"total": 0, "fuera": 0})
+            "SELECT distrito_id, zona, estado FROM medidores", profile="analytics")
+        zonas: dict[tuple[int, str], dict[str, int]] = defaultdict(lambda: {"total": 0, "falla": 0})
         for r in rows:
-            zonas[(r["distrito_id"], r["zona_id"])]["total"] += 1
-            if r["estado"] != "ACTIVO":
-                zonas[(r["distrito_id"], r["zona_id"])]["fuera"] += 1
+            key = (r["distrito_id"], r["zona"] or "?")
+            zonas[key]["total"] += 1
+            if not _es_activo(r["estado"]):
+                zonas[key]["falla"] += 1
         return sorted(
-            [{"distrito_id": d, "zona_id": z, **v,
-              "tasa_fuera": round(v["fuera"] / v["total"], 3) if v["total"] else 0}
+            [{"distrito_id": d, "zona": z, **v,
+              "tasa_falla": round(v["falla"]/v["total"], 3) if v["total"] else 0}
              for (d, z), v in zonas.items()],
-            key=lambda x: -x["tasa_fuera"],
+            key=lambda x: -x["tasa_falla"],
         )[:30]
     return await _cached("q:renovacion", _q, ttl=300)
 
@@ -312,15 +321,16 @@ async def zonas_renovacion(_u: dict = Depends(current_user)):
 async def zonas_errores_por_distrito(distrito: int, _u: dict = Depends(current_user)):
     def _q():
         rows = cassandra_client.execute_raw(
-            f"SELECT zona_id, estado, medidor_id FROM medidores WHERE distrito_id = {int(distrito)} ALLOW FILTERING",
+            f"SELECT zona, estado FROM medidores WHERE distrito_id = {int(distrito)} ALLOW FILTERING",
             profile="analytics",
         )
-        agg: dict[int, dict[str, int]] = defaultdict(lambda: {"total": 0, "fallas": 0})
+        agg: dict[str, dict[str, int]] = defaultdict(lambda: {"total": 0, "fallas": 0})
         for r in rows:
-            agg[r["zona_id"]]["total"] += 1
-            if r["estado"] != "ACTIVO":
-                agg[r["zona_id"]]["fallas"] += 1
-        return [{"zona_id": z, **v} for z, v in sorted(agg.items())]
+            z = r["zona"] or "?"
+            agg[z]["total"] += 1
+            if not _es_activo(r["estado"]):
+                agg[z]["fallas"] += 1
+        return [{"zona": z, **v} for z, v in sorted(agg.items())]
     return await _cached(f"q:zonas_err:{distrito}", _q, ttl=300)
 
 
@@ -328,143 +338,134 @@ async def zonas_errores_por_distrito(distrito: int, _u: dict = Depends(current_u
 async def cobertura_antenas(_u: dict = Depends(current_user)):
     def _q():
         c: Counter[int] = Counter()
-        for r in cassandra_client.execute_raw(
-            "SELECT gateway_id FROM medidores", profile="analytics"
-        ):
-            c[r["gateway_id"]] += 1
+        for r in cassandra_client.execute_raw("SELECT gateway_id FROM medidores", profile="analytics"):
+            if r["gateway_id"] is not None:
+                c[r["gateway_id"]] += 1
         return [{"gateway_id": g, "medidores": n} for g, n in c.most_common()]
     return await _cached("q:cobertura", _q, ttl=300)
 
 
 # ----------------------------------------------------------------------------
-# 16. Proyección de demanda a 5 años (regresión lineal simple)
+# 16. Proyección demanda (regresión lineal por periodo)
 # ----------------------------------------------------------------------------
 @router.get("/proyeccion-demanda-5anios")
 async def proyeccion_demanda_5anios(_u: dict = Depends(current_user)):
     def _q():
         agg: dict[str, int] = defaultdict(int)
         for r in cassandra_client.execute_raw(
-            "SELECT fecha, consumo_litros FROM lecturas_por_zona_dia",
-            profile="analytics",
+            "SELECT periodo, consumo_m3 FROM lecturas_por_zona_periodo", profile="analytics",
         ):
-            agg[str(r["fecha"])[:7]] += r["consumo_litros"]
+            agg[r["periodo"]] += r["consumo_m3"] or 0
         meses = sorted(agg.items())
         if len(meses) < 2:
-            return {"datos": meses, "proyeccion_5a_m3": None}
-        # Slope simple por mes
+            return {"historico_mensual_m3": meses, "proyeccion_5a_m3_mes": None}
         xs = list(range(len(meses)))
         ys = [v for _, v in meses]
         n = len(xs)
         sumx, sumy = sum(xs), sum(ys)
-        sumxy = sum(x * y for x, y in zip(xs, ys))
-        sumxx = sum(x * x for x in xs)
-        slope = (n * sumxy - sumx * sumy) / (n * sumxx - sumx * sumx)
-        intercept = (sumy - slope * sumx) / n
-        proyec = intercept + slope * (n + 60)
-        return {
-            "historico_mensual_litros": meses,
-            "proyeccion_5a_litros_mes": round(proyec, 2),
-            "proyeccion_5a_m3_mes": round(proyec / 1000, 2),
-        }
+        sumxy = sum(x*y for x, y in zip(xs, ys))
+        sumxx = sum(x*x for x in xs)
+        denom = (n*sumxx - sumx*sumx) or 1
+        slope = (n*sumxy - sumx*sumy) / denom
+        intercept = (sumy - slope*sumx) / n
+        proyec = intercept + slope*(n + 60)
+        return {"historico_mensual_m3": meses, "proyeccion_5a_m3_mes": round(proyec, 2)}
     return await _cached("q:proyeccion5a", _q, ttl=600)
 
 
 # ----------------------------------------------------------------------------
-# 17. Impacto de cambio tarifa (simulación)
+# 17. Impacto cambio tarifa
 # ----------------------------------------------------------------------------
 @router.get("/impacto-cambio-tarifa")
 async def impacto_cambio_tarifa(desde: str, hacia: str, _u: dict = Depends(current_user)):
-    # Simulación: re-clasifica medidores `desde` → `hacia` y recalcula
-    # ingreso mensual con consumo promedio.
     def _q():
-        n = sum(
-            1 for r in cassandra_client.execute_raw(
-                f"SELECT medidor_id FROM medidores WHERE categoria_tarifa='{desde}' ALLOW FILTERING",
-                profile="analytics",
-            )
-        )
-        return {"medidores_afectados": n, "desde": desde, "hacia": hacia,
-                "nota": "Cálculo monetario se ejecuta vía /facturas/generar con simulación"}
+        n = sum(1 for r in cassandra_client.execute_raw(
+            f"SELECT mac FROM medidores WHERE subcategoria='{desde}' ALLOW FILTERING",
+            profile="analytics"))
+        return {"medidores_afectados": n, "desde": desde, "hacia": hacia}
     return await _cached(f"q:impacto:{desde}:{hacia}", _q, ttl=300)
 
 
 # ----------------------------------------------------------------------------
-# 18. Medidores sin reporte (>72h)
+# 18. Medidores sin reporte
 # ----------------------------------------------------------------------------
 @router.get("/medidores-sin-reporte")
-async def medidores_sin_reporte(horas: int = 72, _u: dict = Depends(current_user)):
-    return {"nota": f"Requiere materialized view de última lectura; ejecutar ETL. Threshold={horas}h"}
+async def medidores_sin_reporte(_u: dict = Depends(current_user)):
+    def _q():
+        con_lectura = set()
+        for r in cassandra_client.execute_raw(
+            "SELECT mac FROM lecturas_por_zona_periodo", profile="analytics"):
+            con_lectura.add(r["mac"])
+        total = sum(1 for _ in cassandra_client.execute_raw("SELECT mac FROM medidores", profile="analytics"))
+        return {"medidores_total": total, "con_lectura": len(con_lectura),
+                "sin_reporte": total - len(con_lectura)}
+    return await _cached("q:sin_reporte", _q, ttl=300)
 
 
 # ----------------------------------------------------------------------------
-# 19. Proyección de ingresos del mes
+# 19. Proyección ingresos del mes
 # ----------------------------------------------------------------------------
 @router.get("/proyeccion-ingresos-mes")
 async def proyeccion_ingresos_mes(_u: dict = Depends(current_user)):
     def _q():
         c = Counter()
         for r in cassandra_client.execute_raw(
-            "SELECT categoria_tarifa FROM medidores WHERE estado='ACTIVO' ALLOW FILTERING",
-            profile="analytics",
-        ):
-            c[r["categoria_tarifa"]] += 1
-        # Tarifas USD/mes promedio (cargo fijo) — sacadas del Excel
-        precios = {"R1": 1.4, "R2": 2.8, "R3": 5.2, "R4": 8.7, "C": 10.4,
-                   "CE": 12.2, "I": 9.4, "P": 4.6, "S": 0.7}
+            "SELECT subcategoria, estado FROM medidores", profile="analytics"):
+            if _es_activo(r["estado"]):
+                c[r["subcategoria"] or "?"] += 1
+        precios = {"R1": 1.4, "R2": 2.78, "R3": 5.21, "R4": 8.69, "C": 10.43,
+                   "CE": 12.17, "I": 9.39, "P": 4.58, "S": 7.64}
         ingreso_usd = sum(c[k] * precios.get(k, 0) for k in c)
-        return {"medidores_por_categoria": dict(c),
-                "ingreso_mensual_usd_aprox": round(ingreso_usd, 2)}
+        return {"medidores_por_categoria": dict(c), "ingreso_mensual_usd_aprox": round(ingreso_usd, 2)}
     return await _cached("q:ingresos_mes", _q, ttl=600)
 
 
 # ----------------------------------------------------------------------------
-# 20. Consumo mínimo residencial
-# 21. Ingresos en pies cúbicos (convertido)
+# 20/21. Consumo mínimo + ingresos en pies³
 # ----------------------------------------------------------------------------
 @router.get("/consumo-minimo-residencial")
 async def consumo_minimo_residencial(_u: dict = Depends(current_user)):
-    return {"minimo_m3": 12, "nota": "Cargo fijo de 12 m³/mes para todas las residenciales"}
+    return {"minimo_m3": 12, "nota": "Cargo fijo de 12 m³/mes para residenciales"}
 
 
 @router.get("/ingresos-pies3")
 async def ingresos_pies3(_u: dict = Depends(current_user)):
     def _q():
-        litros_total = 0
+        m3_total = 0
         for r in cassandra_client.execute_raw(
-            "SELECT consumo_litros FROM lecturas_por_zona_dia", profile="analytics"
-        ):
-            litros_total += r["consumo_litros"]
-        m3 = litros_total / 1000
-        pies3 = m3 * 35.3147
-        return {"consumo_total_m3": round(m3, 2), "consumo_pies3": round(pies3, 2)}
+            "SELECT consumo_m3 FROM lecturas_por_zona_periodo", profile="analytics"):
+            m3_total += r["consumo_m3"] or 0
+        pies3 = m3_total * 35.3147
+        return {"consumo_total_m3": m3_total, "consumo_pies3": round(pies3, 2)}
     return await _cached("q:pies3", _q, ttl=600)
 
 
 # ----------------------------------------------------------------------------
-# Consultas sorpresa
+# Consultas extra
 # ----------------------------------------------------------------------------
 @router.get("/distribucion-categorias")
 async def distribucion_categorias(_u: dict = Depends(current_user)):
     def _q():
         c = Counter()
-        for r in cassandra_client.execute_raw(
-            "SELECT categoria_tarifa FROM medidores", profile="analytics"
-        ):
-            c[r["categoria_tarifa"]] += 1
+        for r in cassandra_client.execute_raw("SELECT subcategoria FROM medidores", profile="analytics"):
+            c[r["subcategoria"] or "?"] += 1
         return dict(c)
     return await _cached("q:distribucion_cat", _q, ttl=600)
 
 
 @router.get("/horas-pico")
-async def horas_pico(_u: dict = Depends(current_user)):
+async def horas_pico(limite: int = 20000, _u: dict = Depends(current_user)):
+    """Consumo por hora del día (muestreo de lecturas)."""
     def _q():
         c: dict[int, int] = defaultdict(int)
-        for r in cassandra_client.execute_raw(
-            "SELECT hora, consumo_litros FROM lecturas_por_zona_dia",
+        rows = cassandra_client.execute_raw(
+            f"SELECT fecha_hora, consumo_m3 FROM lecturas_por_medidor LIMIT {int(limite)}",
             profile="analytics",
-        ):
-            c[r["hora"]] += r["consumo_litros"]
-        return sorted([{"hora": h, "consumo_litros": v} for h, v in c.items()])
+        )
+        for r in rows:
+            if r["fecha_hora"]:
+                c[r["fecha_hora"].hour] += r["consumo_m3"] or 0
+        return sorted([{"hora": h, "consumo_m3": v} for h, v in c.items()])
     return await _cached("q:pico", _q, ttl=180)
 
 
@@ -472,20 +473,55 @@ async def horas_pico(_u: dict = Depends(current_user)):
 async def medidores_por_modelo(_u: dict = Depends(current_user)):
     def _q():
         c = Counter()
-        for r in cassandra_client.execute_raw(
-            "SELECT modelo_id FROM medidores", profile="analytics"
-        ):
-            c[r["modelo_id"]] += 1
-        return [{"modelo_id": k, "medidores": v} for k, v in sorted(c.items())]
+        for r in cassandra_client.execute_raw("SELECT tipo_medidor_id FROM medidores", profile="analytics"):
+            c[r["tipo_medidor_id"]] += 1
+        return [{"modelo_id": k, "medidores": v} for k, v in sorted(c.items(), key=lambda x: str(x[0]))]
     return await _cached("q:modelos_count", _q, ttl=600)
+
+
+@router.get("/consumo-vs-clima")
+async def consumo_vs_clima(
+    start_date: str = Query("2026-02-01"),
+    end_date: str = Query("2026-04-30"),
+    _u: dict = Depends(current_user),
+):
+    """Correlación mensual: consumo total (m³) vs temperatura media y sequía (Open-Meteo)."""
+    cache_key = f"q:clima:{start_date}:{end_date}"
+    cached = await redis_client.get(cache_key)
+    if cached:
+        return json.loads(cached)
+
+    # Consumo mensual desde lecturas
+    consumo: dict[str, int] = defaultdict(int)
+    for r in cassandra_client.execute_raw(
+        "SELECT periodo, consumo_m3 FROM lecturas_por_zona_periodo", profile="analytics"):
+        consumo[r["periodo"]] += r["consumo_m3"] or 0
+
+    clima = await fetch_clima_mensual(start_date, end_date)
+
+    periodos = sorted(set(consumo) | set(clima))
+    serie = []
+    for p in periodos:
+        c = clima.get(p, {})
+        serie.append({
+            "periodo": p,
+            "consumo_m3": consumo.get(p, 0),
+            "temp_media": c.get("temp_media"),
+            "precip_mm": c.get("precip_mm"),
+            "sequia_indice": (c.get("sequia") or {}).get("indice"),
+            "sequia_nivel": (c.get("sequia") or {}).get("nivel"),
+        })
+    payload = {"serie": serie, "fuente": "Open-Meteo (archive-api)"}
+    await redis_client.set(cache_key, json.dumps(payload, default=str), ttl_seconds=1800)
+    return payload
 
 
 @router.get("/resumen-cobertura-poblacional")
 async def resumen_cobertura_poblacional(_u: dict = Depends(current_user)):
     def _q():
-        rows = list(cassandra_client.execute_raw("SELECT habitantes FROM distritos", profile="analytics"))
-        total = sum(r.get("habitantes") or 0 for r in rows)
-        n_med = sum(1 for _ in cassandra_client.execute_raw("SELECT medidor_id FROM medidores", profile="analytics"))
+        total = sum(r.get("habitantes") or 0
+                    for r in cassandra_client.execute_raw("SELECT habitantes FROM distritos", profile="analytics"))
+        n_med = sum(1 for _ in cassandra_client.execute_raw("SELECT mac FROM medidores", profile="analytics"))
         return {"poblacion_total": total, "medidores_total": n_med,
                 "medidores_por_1000_hab": round(n_med * 1000 / total, 2) if total else 0}
     return await _cached("q:cobertura_pob", _q, ttl=600)

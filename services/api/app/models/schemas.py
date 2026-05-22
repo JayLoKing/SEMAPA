@@ -42,10 +42,9 @@ class BusquedaResultado(BaseModel):
 
 # ============== Lectura manual (mobile) ==============
 class LecturaManualIn(BaseModel):
-    medidor_id: Optional[UUID] = None
     mac: Optional[str] = None
-    numero_contrato: Optional[int] = None
-    lectura_litros: int = Field(ge=0)
+    numero_contrato: Optional[str] = None     # CT-xxx
+    lectura_actual: int = Field(ge=0)         # lectura del medidor (m³)
     lat: Optional[float] = None
     lon: Optional[float] = None
     foto_url: Optional[str] = None
@@ -61,7 +60,7 @@ class NotifyIn(BaseModel):
 
 # ============== Facturas ==============
 class FacturaOut(BaseModel):
-    numero_contrato: int
+    numero_contrato: str
     periodo: str
     factura_id: UUID
     consumo_m3: str

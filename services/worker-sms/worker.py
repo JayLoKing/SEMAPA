@@ -66,47 +66,52 @@ def connect_cassandra():
     raise RuntimeError("Cassandra no disponible")
 
 
+# Data real no incluye teléfono → destinatario de prueba (Twilio trial verificado)
+NOTIFY_TEST_PHONE = os.getenv("NOTIFY_TEST_PHONE", "")
+
+
 def resolve_contrato(session, identificador, valor):
+    """Devuelve (numero_contrato CT-xxx, titular)."""
     if identificador == "contrato":
-        return int(valor)
+        nc = valor.strip().upper()
+        rows = list(session.execute("SELECT titular_contrato FROM contratos WHERE numero_contrato = %s", (nc,)))
+        return (nc, rows[0]["titular_contrato"] if rows else "Cliente")
     if identificador == "mac":
-        rows = list(session.execute("SELECT numero_contrato FROM medidores WHERE mac = %s", (valor.upper(),)))
-        return rows[0]["numero_contrato"] if rows else None
+        rows = list(session.execute(
+            "SELECT numero_contrato, titular_contrato FROM contrato_por_mac WHERE medidor_iot = %s",
+            (valor.upper(),)))
+        if rows:
+            return (rows[0]["numero_contrato"], rows[0].get("titular_contrato") or "Cliente")
     if identificador == "carnet":
-        rows = list(session.execute("SELECT persona_id FROM personas WHERE documento = %s", (valor,)))
-        if not rows:
-            return None
-        infs = list(session.execute("SELECT infraestructura_id FROM infraestructuras WHERE persona_id = %s", (rows[0]["persona_id"],)))
-        for inf in infs:
-            meds = list(session.execute(
-                "SELECT numero_contrato FROM medidores WHERE infraestructura_id = %s ALLOW FILTERING",
-                (inf["infraestructura_id"],)))
-            if meds:
-                return meds[0]["numero_contrato"]
-    return None
+        for ci in {valor, f"{valor} CBBA", valor.split()[0] if valor.split() else valor}:
+            rows = list(session.execute(
+                "SELECT numero_contrato FROM contratos_por_ci WHERE ci_titular = %s", (ci,)))
+            if rows:
+                nc = rows[0]["numero_contrato"]
+                t = list(session.execute("SELECT titular_contrato FROM contratos WHERE numero_contrato = %s", (nc,)))
+                return (nc, t[0]["titular_contrato"] if t else "Cliente")
+    return (None, None)
 
 
-def load_data(session, contrato, periodo):
+def load_data(session, contrato, titular, periodo):
+    """Factura del periodo; si no existe la calcula desde lecturas."""
     factura = list(session.execute(
         "SELECT monto_bs, consumo_m3 FROM facturas WHERE numero_contrato = %s AND periodo = %s",
         (contrato, periodo)))
-    if not factura:
+    if factura:
+        f = factura[0]
+        return {"telefono": NOTIFY_TEST_PHONE, "apellido": titular or "Cliente",
+                "factura": {"monto_bs": f["monto_bs"], "consumo_m3": f["consumo_m3"]}}
+    # Fallback: consumo desde lecturas (sin monto facturado)
+    crow = list(session.execute("SELECT medidor_iot FROM contratos WHERE numero_contrato = %s", (contrato,)))
+    if not crow or not crow[0].get("medidor_iot"):
         return None
-    medidor = list(session.execute("SELECT infraestructura_id FROM medidores WHERE numero_contrato = %s", (contrato,)))
-    telefono = None
-    apellido = "Cliente"
-    if medidor:
-        inf = list(session.execute("SELECT persona_id FROM infraestructuras WHERE infraestructura_id = %s",
-                                   (medidor[0]["infraestructura_id"],)))
-        if inf:
-            pers = list(session.execute(
-                "SELECT telefono, apellidos, razon_social, tipo FROM personas WHERE persona_id = %s",
-                (inf[0]["persona_id"],)))
-            if pers:
-                p = pers[0]
-                telefono = p.get("telefono")
-                apellido = p.get("razon_social") if p.get("tipo") == "JURIDICA" else p.get("apellidos")
-    return {"factura": factura[0], "telefono": telefono, "apellido": apellido}
+    mac = crow[0]["medidor_iot"].upper()
+    lect = list(session.execute(
+        "SELECT consumo_m3 FROM lecturas_por_medidor WHERE mac = %s AND periodo = %s", (mac, periodo)))
+    consumo = sum(int(l.get("consumo_m3") or 0) for l in lect)
+    return {"telefono": NOTIFY_TEST_PHONE, "apellido": titular or "Cliente",
+            "factura": {"monto_bs": "s/factura", "consumo_m3": consumo}}
 
 
 def _normalize_phone_e164(tel: str) -> str:
@@ -146,15 +151,15 @@ def send_sms(telefono: str, body: str):
 
 
 def handle(session, message: dict):
-    contrato = resolve_contrato(session, message["identificador"], message["valor"])
+    contrato, titular = resolve_contrato(session, message["identificador"], message["valor"])
     if not contrato:
         raise ValueError(f"Contrato no resuelto: {message}")
-    data = load_data(session, contrato, message["periodo"])
+    data = load_data(session, contrato, titular, message["periodo"])
     if not data:
         raise ValueError(f"Datos no encontrados: {contrato}")
     if not data["telefono"]:
-        raise ValueError("Sin teléfono registrado")
-    body = (f"SEMAPA: Sr. {data['apellido']} su recibo {message['periodo']} es "
+        raise ValueError("Sin teléfono destino (configura NOTIFY_TEST_PHONE)")
+    body = (f"SEMAPA: Sr(a). {data['apellido']} su preaviso {message['periodo']} es "
             f"Bs {data['factura']['monto_bs']}. Consumo {data['factura']['consumo_m3']} m³.")
     send_sms(data["telefono"], body)
 

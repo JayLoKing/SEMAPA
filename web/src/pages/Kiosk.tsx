@@ -266,6 +266,9 @@ function ResultScreen({
             )}
           </div>
 
+          {/* Acciones tótem */}
+          <KioskActions data={data} />
+
           {/* Action buttons */}
           <div className="no-print flex gap-6 px-8 pb-8 pt-2">
             <button
@@ -291,6 +294,75 @@ function ResultScreen({
         </div>
       </div>
     </>
+  );
+}
+
+// ── Acciones del tótem: pago QR, reporte de fuga, actualizar datos ─────────
+function KioskActions({ data }: { data: KioskData }) {
+  const [msg, setMsg] = useState<string | null>(null);
+  const [qr, setQr] = useState<string | null>(null);
+
+  const pendiente = (data.facturas || []).find((f) => (f.estado || "").toUpperCase() !== "PAGADA");
+
+  async function pagar() {
+    if (!pendiente) { setMsg("No hay facturas pendientes."); return; }
+    try {
+      const r = await axios.post(`${BASE_URL}/kiosk/pago`, {
+        numero_contrato: data.contrato, periodo: pendiente.periodo, monto_bs: pendiente.monto_bs,
+      });
+      setQr(r.data.qr);
+      setMsg(`Pago registrado para ${pendiente.periodo}. Escanee el QR como comprobante.`);
+    } catch { setMsg("Error al procesar el pago."); }
+  }
+
+  async function reportarFuga() {
+    const desc = window.prompt("Describa la fuga o reclamo:") || "";
+    try {
+      await axios.post(`${BASE_URL}/kiosk/reclamo`, {
+        numero_contrato: data.contrato, tipo: "FUGA", descripcion: desc,
+      });
+      setMsg("Reporte de fuga registrado. Gracias.");
+    } catch { setMsg("Error al registrar el reporte."); }
+  }
+
+  async function actualizarDatos() {
+    const telefono = window.prompt("Nuevo teléfono:") || "";
+    const email = window.prompt("Nuevo email:") || "";
+    try {
+      await axios.post(`${BASE_URL}/kiosk/contacto`, { numero_contrato: data.contrato, telefono, email });
+      setMsg("Datos de contacto actualizados.");
+    } catch { setMsg("Error al actualizar datos."); }
+  }
+
+  return (
+    <div className="no-print px-8 pt-2 pb-2 space-y-3">
+      {msg && (
+        <div className="bg-green-50 border border-green-300 text-green-800 rounded-xl px-4 py-3 text-lg font-semibold">
+          {msg}
+          {qr && (
+            <img
+              alt="QR pago"
+              className="mt-2 mx-auto"
+              src={`https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(qr)}`}
+            />
+          )}
+        </div>
+      )}
+      <div className="grid grid-cols-3 gap-4">
+        <button onClick={pagar}
+          className="flex items-center justify-center gap-2 bg-green-600 hover:bg-green-500 text-white font-bold text-lg uppercase py-4 rounded-2xl shadow active:scale-95">
+          Pagar QR
+        </button>
+        <button onClick={reportarFuga}
+          className="flex items-center justify-center gap-2 bg-amber-500 hover:bg-amber-400 text-white font-bold text-lg uppercase py-4 rounded-2xl shadow active:scale-95">
+          Reportar fuga
+        </button>
+        <button onClick={actualizarDatos}
+          className="flex items-center justify-center gap-2 bg-slate-600 hover:bg-slate-500 text-white font-bold text-lg uppercase py-4 rounded-2xl shadow active:scale-95">
+          Actualizar datos
+        </button>
+      </div>
+    </div>
   );
 }
 

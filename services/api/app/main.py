@@ -14,7 +14,7 @@ from app.core.config import settings
 from app.core.middleware import JsonLogMiddleware, RateLimitMiddleware
 from app.core.redis_client import redis_client
 from app.routers import (anomalias, auth, buscar, consultas, dashboard,
-                         facturas, kiosk, lecturas, notify, usd)
+                         facturas, kiosk, lecturas, mapa, notify, usd)
 
 
 @asynccontextmanager
@@ -72,3 +72,4 @@ app.include_router(buscar.router, prefix="/api/v1/buscar", tags=["buscar"])
 app.include_router(lecturas.router, prefix="/api/v1/lecturas", tags=["lecturas"])
 app.include_router(kiosk.router, prefix="/api/v1/kiosk", tags=["kiosk"])
 app.include_router(anomalias.router, prefix="/api/v1/anomalias", tags=["anomalias"])
+app.include_router(mapa.router, prefix="/api/v1/mapa", tags=["mapa"])

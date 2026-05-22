@@ -6,11 +6,38 @@ html, body, #root {
   height: 100%;
   margin: 0;
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  background: #f8fafc;
+  background: #f1f5f9;
   color: #0f172a;
+  transition: background-color .25s ease, color .25s ease;
+}
+
+html.dark, html.dark body, html.dark #root {
+  background: #0b1220;
+  color: #e2e8f0;
 }
 
 .leaflet-container {
   width: 100%;
   height: 100%;
+  background: #e5e7eb;
 }
+html.dark .leaflet-container { background: #0b1220; }
+
+/* Scrollbar minimalista */
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb { background: rgba(100,116,139,.4); border-radius: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* ── Dark mode: overrides genéricos para páginas existentes ── */
+html.dark .bg-white { background-color: #111a2e !important; }
+html.dark .bg-slate-50 { background-color: #0f1830 !important; }
+html.dark .bg-slate-100 { background-color: #1b2740 !important; }
+html.dark .border, html.dark .border-b, html.dark .border-t,
+html.dark .border-slate-200, html.dark .border-slate-100 { border-color: #1b2740 !important; }
+html.dark .text-slate-900, html.dark .text-slate-800 { color: #e2e8f0 !important; }
+html.dark .text-slate-700, html.dark .text-slate-600 { color: #cbd5e1 !important; }
+html.dark .text-slate-500, html.dark .text-slate-400 { color: #94a3b8 !important; }
+html.dark .shadow-sm, html.dark .shadow, html.dark .shadow-lg { box-shadow: 0 1px 0 rgba(255,255,255,.04), 0 8px 24px rgba(2,8,23,.5) !important; }
+html.dark .text-semapa-900 { color: #b6e0fe !important; }
+/* tablas / hover */
+html.dark .hover\:bg-slate-50:hover { background-color: #1b2740 !important; }

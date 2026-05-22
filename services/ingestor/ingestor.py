@@ -51,7 +51,7 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 
 
 # ---------------------- metrics ----------------------
-ANOMALY_THRESHOLD = int(os.getenv("ANOMALY_THRESHOLD_LITROS", "50000"))  # 50m³ salto = anomalía
+ANOMALY_THRESHOLD = int(os.getenv("ANOMALY_THRESHOLD_M3", "5000"))  # salto >5000 m³ = anomalía
 
 METRICS = {
     "files_processed": 0,
@@ -98,12 +98,12 @@ def init_state() -> None:
             time.sleep(5)
     State.redis = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
     State.ps_lecturas = State.session.prepare(
-        "INSERT INTO lecturas_por_medidor (medidor_id, anio_mes, fecha_hora, gateway_id, "
-        "lectura_litros, consumo_litros, status) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO lecturas_por_medidor (mac, periodo, fecha_hora, lectura_anterior, "
+        "lectura_actual, consumo_m3, radiobase, fecha_pago, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     State.ps_lecturas_zona = State.session.prepare(
-        "INSERT INTO lecturas_por_zona_dia (distrito_id, zona_id, fecha, hora, medidor_id, "
-        "consumo_litros, categoria_tarifa) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO lecturas_por_zona_periodo (distrito_id, zona, periodo, mac, "
+        "consumo_m3, subcategoria) VALUES (?, ?, ?, ?, ?, ?)"
     )
     State.ps_lecturas_raw = State.session.prepare(
         "INSERT INTO lecturas_raw (gateway_id, fecha, ts, mac, payload, procesado, error_motivo) "
@@ -116,13 +116,13 @@ def init_state() -> None:
 @lru_cache(maxsize=200_000)
 def lookup_medidor(mac: str) -> tuple | None:
     rows = list(State.session.execute(
-        "SELECT medidor_id, distrito_id, zona_id, categoria_tarifa, gateway_id FROM medidores WHERE mac = %s",
+        "SELECT distrito_id, zona, subcategoria, gateway_id FROM medidores WHERE mac = %s",
         (mac,),
     ))
     if not rows:
         return None
     r = rows[0]
-    return (r["medidor_id"], r["distrito_id"], r["zona_id"], r["categoria_tarifa"], r["gateway_id"])
+    return (r["distrito_id"], r["zona"], r["subcategoria"], r["gateway_id"])
 
 
 # ---------------------- parsing ----------------------
@@ -163,33 +163,35 @@ def process_file(path: Path) -> None:
         if not meta:
             rows_raw.append((antena, ts.date(), ts, mac, raw_line, False, "mac_no_encontrado"))
             continue
-        medidor_id, dist_id, zona_id, cat, gw = meta
-        litros = int(lectura * 1000)
-        anio_mes = ts.year * 100 + ts.month
+        dist_id, zona, subcat, gw = meta
+        lectura_actual = int(lectura)            # lectura en m³ (acumulado)
+        periodo = f"{ts.year:04d}-{ts.month:02d}"
 
         # ---- Consumo diferencial + detección de anomalías ----
         last_key = f"last_lectura:{mac}"
+        lectura_anterior = lectura_actual
         consumo = 0
         flag_status = status  # 1=OK, 2=Manual, 3..9=errores
         try:
             last_val = State.redis.get(last_key)
             if last_val is not None:
-                consumo = litros - int(last_val)
+                lectura_anterior = int(last_val)
+                consumo = lectura_actual - lectura_anterior
                 if consumo < 0:
-                    # Reseteo de medidor o lectura negativa (reemplaza contador)
-                    consumo = litros
-                    flag_status = 8  # RESET
-                    logger.warning(f"RESET medidor {mac}: delta={consumo}")
+                    consumo = lectura_actual          # reset de medidor
+                    flag_status = 8
+                    logger.warning(f"RESET medidor {mac}")
                 elif consumo > ANOMALY_THRESHOLD:
-                    flag_status = 9  # ANOMALIA: salto imposible
+                    flag_status = 9                   # salto imposible
                     METRICS["anomalies_detected"] += 1
-                    logger.warning(f"ANOMALIA {mac}: consumo={consumo}L threshold={ANOMALY_THRESHOLD}L")
-            State.redis.set(last_key, litros)
+                    logger.warning(f"ANOMALIA {mac}: consumo={consumo}m³")
+            State.redis.set(last_key, lectura_actual)
         except Exception as e:
             logger.warning(f"Redis anomaly check falló: {e}")
 
-        rows_med.append((medidor_id, anio_mes, ts, gw or antena, litros, consumo, flag_status))
-        rows_zona.append((dist_id, zona_id, ts.date(), ts.hour, medidor_id, consumo, cat))
+        rows_med.append((mac, periodo, ts, lectura_anterior, lectura_actual, consumo,
+                         gw or antena, None, flag_status))
+        rows_zona.append((dist_id, zona, periodo, mac, consumo, subcat))
         rows_raw.append((gw or antena, ts.date(), ts, mac, raw_line, True, None))
 
     if rows_med:

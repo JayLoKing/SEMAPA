@@ -20,7 +20,7 @@ from app.core.security import current_user
 
 router = APIRouter()
 
-_UMBRAL_CONSUMO_LITROS = 50_000  # litros: umbral para anomalía de consumo excesivo
+_UMBRAL_CONSUMO_M3 = 150  # m³: umbral para anomalía de consumo excesivo en un periodo
 
 
 def _serialize_value(v: Any) -> Any:
@@ -41,15 +41,15 @@ async def anomalias(
     umbral_factor: float = Query(3.0, ge=1.0, le=100.0),
     _u: dict = Depends(current_user),
 ):
-    """Devuelve lecturas con estado ERROR y lecturas con consumo anómalamente alto."""
-    umbral_litros = int(_UMBRAL_CONSUMO_LITROS * umbral_factor)
+    """Lecturas con status de error + lecturas con consumo anómalamente alto."""
+    umbral_m3 = int(_UMBRAL_CONSUMO_M3 * umbral_factor)
     result: list[dict] = []
 
-    # Lecturas con status de error (status >= 3: errores IoT; status=9: anomalía ingestor)
-    # Columnas reales: medidor_id, anio_mes, fecha_hora, gateway_id, lectura_litros, consumo_litros, status
+    # Lecturas con status de error (status >= 3: errores IoT; status=9: anomalía)
+    # Columnas reales: mac, periodo, fecha_hora, lectura_anterior, lectura_actual, consumo_m3, status
     error_rows = list(
         cassandra_client.execute_raw(
-            f"SELECT medidor_id, consumo_litros, fecha_hora, status "
+            f"SELECT mac, consumo_m3, fecha_hora, status "
             f"FROM lecturas_por_medidor WHERE status >= 3 ALLOW FILTERING LIMIT {limite}",
             profile="analytics",
         )
@@ -58,36 +58,36 @@ async def anomalias(
         tipo = "ANOMALIA_CONSUMO" if r.get("status") == 9 else "ERROR_SENSOR"
         result.append(
             {
-                "medidor_id": _serialize_value(r.get("medidor_id")),
-                "consumo_litros": r.get("consumo_litros"),
+                "medidor_id": r.get("mac"),
+                "consumo_litros": (r.get("consumo_m3") or 0) * 1000,
                 "leido_en": _serialize_value(r.get("fecha_hora")),
                 "estado": f"STATUS_{r.get('status', '?')}",
                 "tipo_anomalia": tipo,
             }
         )
 
-    # Lecturas con consumo excesivo (status normal pero delta enorme)
+    # Lecturas con consumo excesivo (status normal pero salto enorme)
     excesivo_rows = list(
         cassandra_client.execute_raw(
-            f"SELECT medidor_id, consumo_litros, fecha_hora, status "
-            f"FROM lecturas_por_medidor WHERE consumo_litros > {umbral_litros} "
+            f"SELECT mac, consumo_m3, fecha_hora, status "
+            f"FROM lecturas_por_medidor WHERE consumo_m3 > {umbral_m3} "
             f"AND status < 3 ALLOW FILTERING LIMIT {limite}",
             profile="analytics",
         )
     )
     for r in excesivo_rows:
-        consumo = r.get("consumo_litros") or 0
+        consumo = r.get("consumo_m3") or 0
         result.append(
             {
-                "medidor_id": _serialize_value(r.get("medidor_id")),
-                "consumo_litros": consumo,
+                "medidor_id": r.get("mac"),
+                "consumo_litros": consumo * 1000,
                 "leido_en": _serialize_value(r.get("fecha_hora")),
                 "estado": f"STATUS_{r.get('status', '?')}",
                 "tipo_anomalia": "CONSUMO_EXCESIVO",
             }
         )
 
-    return {"total": len(result), "umbral_litros": umbral_litros, "anomalias": result}
+    return {"total": len(result), "umbral_m3": umbral_m3, "anomalias": result}
 
 
 # ----------------------------------------------------------------------------

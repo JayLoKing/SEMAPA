@@ -67,46 +67,48 @@ def connect_cassandra():
     raise RuntimeError("Cassandra no disponible")
 
 
+NOTIFY_TEST_PHONE = os.getenv("NOTIFY_TEST_PHONE", "")
+
+
 def resolve(session, identificador, valor):
+    """Devuelve (numero_contrato CT-xxx, titular)."""
     if identificador == "contrato":
-        return int(valor)
+        nc = valor.strip().upper()
+        rows = list(session.execute("SELECT titular_contrato FROM contratos WHERE numero_contrato = %s", (nc,)))
+        return (nc, rows[0]["titular_contrato"] if rows else "Cliente")
     if identificador == "mac":
-        rows = list(session.execute("SELECT numero_contrato FROM medidores WHERE mac = %s", (valor.upper(),)))
-        return rows[0]["numero_contrato"] if rows else None
+        rows = list(session.execute(
+            "SELECT numero_contrato, titular_contrato FROM contrato_por_mac WHERE medidor_iot = %s",
+            (valor.upper(),)))
+        if rows:
+            return (rows[0]["numero_contrato"], rows[0].get("titular_contrato") or "Cliente")
     if identificador == "carnet":
-        rows = list(session.execute("SELECT persona_id FROM personas WHERE documento = %s", (valor,)))
-        if not rows:
-            return None
-        infs = list(session.execute("SELECT infraestructura_id FROM infraestructuras WHERE persona_id = %s", (rows[0]["persona_id"],)))
-        for inf in infs:
-            meds = list(session.execute(
-                "SELECT numero_contrato FROM medidores WHERE infraestructura_id = %s ALLOW FILTERING",
-                (inf["infraestructura_id"],)))
-            if meds:
-                return meds[0]["numero_contrato"]
-    return None
+        for ci in {valor, f"{valor} CBBA", valor.split()[0] if valor.split() else valor}:
+            rows = list(session.execute(
+                "SELECT numero_contrato FROM contratos_por_ci WHERE ci_titular = %s", (ci,)))
+            if rows:
+                nc = rows[0]["numero_contrato"]
+                t = list(session.execute("SELECT titular_contrato FROM contratos WHERE numero_contrato = %s", (nc,)))
+                return (nc, t[0]["titular_contrato"] if t else "Cliente")
+    return (None, None)
 
 
-def load_data(session, contrato, periodo):
+def load_data(session, contrato, titular, periodo):
     f = list(session.execute(
         "SELECT monto_bs, consumo_m3 FROM facturas WHERE numero_contrato = %s AND periodo = %s",
         (contrato, periodo)))
-    if not f:
+    if f:
+        return {"f": {"monto_bs": f[0]["monto_bs"], "consumo_m3": f[0]["consumo_m3"]},
+                "tel": NOTIFY_TEST_PHONE, "apellido": titular or "Cliente"}
+    crow = list(session.execute("SELECT medidor_iot FROM contratos WHERE numero_contrato = %s", (contrato,)))
+    if not crow or not crow[0].get("medidor_iot"):
         return None
-    m = list(session.execute("SELECT infraestructura_id FROM medidores WHERE numero_contrato = %s", (contrato,)))
-    tel = None
-    apellido = "Cliente"
-    if m:
-        inf = list(session.execute("SELECT persona_id FROM infraestructuras WHERE infraestructura_id = %s",
-                                   (m[0]["infraestructura_id"],)))
-        if inf:
-            p = list(session.execute(
-                "SELECT telefono, apellidos, razon_social, tipo FROM personas WHERE persona_id = %s",
-                (inf[0]["persona_id"],)))
-            if p:
-                tel = p[0].get("telefono")
-                apellido = p[0].get("razon_social") if p[0].get("tipo") == "JURIDICA" else p[0].get("apellidos")
-    return {"f": f[0], "tel": tel, "apellido": apellido}
+    mac = crow[0]["medidor_iot"].upper()
+    lect = list(session.execute(
+        "SELECT consumo_m3 FROM lecturas_por_medidor WHERE mac = %s AND periodo = %s", (mac, periodo)))
+    consumo = sum(int(l.get("consumo_m3") or 0) for l in lect)
+    return {"f": {"monto_bs": "s/factura", "consumo_m3": consumo},
+            "tel": NOTIFY_TEST_PHONE, "apellido": titular or "Cliente"}
 
 
 def _normalize_phone_e164(tel: str) -> str:
@@ -145,13 +147,13 @@ def send_whatsapp(tel: str, body: str, content_vars: dict | None = None):
 
 
 def handle(session, msg: dict):
-    contrato = resolve(session, msg["identificador"], msg["valor"])
+    contrato, titular = resolve(session, msg["identificador"], msg["valor"])
     if not contrato:
         raise ValueError(f"Contrato no resuelto: {msg}")
-    data = load_data(session, contrato, msg["periodo"])
+    data = load_data(session, contrato, titular, msg["periodo"])
     if not data or not data["tel"]:
-        raise ValueError("Sin teléfono o factura")
-    body = (f"SEMAPA — Hola Sr. {data['apellido']}. Recibo {msg['periodo']}: "
+        raise ValueError("Sin teléfono destino (configura NOTIFY_TEST_PHONE)")
+    body = (f"SEMAPA — Hola Sr(a). {data['apellido']}. Recibo {msg['periodo']}: "
             f"Bs {data['f']['monto_bs']}. Consumo {data['f']['consumo_m3']} m³. "
             f"Gracias por su pago puntual.")
     # Variables del template demo Twilio (HXb5b... = "Your appointment is on {{1}} at {{2}}")

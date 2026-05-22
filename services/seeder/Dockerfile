@@ -20,4 +20,4 @@ RUN apt-get update \
 COPY --from=builder /install /usr/local
 COPY --chown=appuser:appuser . .
 USER appuser
-CMD ["python", "-u", "seed.py"]
+CMD ["python", "-u", "load_real.py"]

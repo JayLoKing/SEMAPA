@@ -3,8 +3,8 @@ import { api } from "../api/client";
 import { Mail, MessageSquare, FileText, Send } from "lucide-react";
 
 export default function Facturacion() {
-  const [contrato, setContrato] = useState("100000001");
-  const [periodo, setPeriodo] = useState("2025-05");
+  const [contrato, setContrato] = useState("CT-00000001");
+  const [periodo, setPeriodo] = useState("2026-02");
   const [factura, setFactura] = useState<any>(null);
   const [canales, setCanales] = useState({ email: true, sms: false, whatsapp: false });
   const [toast, setToast] = useState("");

@@ -91,9 +91,10 @@ async def health():
 # ============================================================================
 # Carga de factura
 # ============================================================================
-def _load_factura(numero_contrato: int, periodo: str) -> dict:
+def _load_factura(numero_contrato: str, periodo: str) -> dict:
     if _session is None:
         raise HTTPException(503, "Cassandra no conectado")
+    numero_contrato = numero_contrato.upper()
     rows = list(_session.execute(
         "SELECT * FROM facturas WHERE numero_contrato = %s AND periodo = %s",
         (numero_contrato, periodo),
@@ -101,28 +102,20 @@ def _load_factura(numero_contrato: int, periodo: str) -> dict:
     if not rows:
         raise HTTPException(404, "Factura no encontrada")
     factura = rows[0]
-    # enrichment opcional: medidor → persona
-    medidor = None
-    persona = None
-    if factura.get("medidor_id"):
-        meds = list(_session.execute(
-            "SELECT * FROM medidores WHERE medidor_id = %s", (factura["medidor_id"],)
-        ))
-        medidor = meds[0] if meds else None
-        if medidor and medidor.get("infraestructura_id"):
+    # enrichment: contrato (titular/ci/catastro) → infra (dirección/zona)
+    cs = list(_session.execute(
+        "SELECT * FROM contratos WHERE numero_contrato = %s", (numero_contrato,)))
+    if cs:
+        c = cs[0]
+        factura["titular"] = c.get("titular_contrato")
+        factura["documento"] = c.get("ci_titular")
+        factura["mac"] = factura.get("mac") or c.get("medidor_iot")
+        factura["categoria"] = c.get("categoria")
+        if c.get("numero_catastro"):
             inf = list(_session.execute(
-                "SELECT * FROM infraestructuras WHERE infraestructura_id = %s",
-                (medidor["infraestructura_id"],),
-            ))
-            if inf and inf[0].get("persona_id"):
-                pers = list(_session.execute(
-                    "SELECT * FROM personas WHERE persona_id = %s",
-                    (inf[0]["persona_id"],),
-                ))
-                persona = pers[0] if pers else None
+                "SELECT * FROM infraestructuras WHERE numero_catastro = %s", (c["numero_catastro"],)))
+            if inf:
                 factura["infraestructura"] = inf[0]
-    factura["medidor"] = medidor
-    factura["persona"] = persona
     return factura
 
 
@@ -137,12 +130,8 @@ def _qr_image(data: str) -> io.BytesIO:
     return buf
 
 
-def _cliente_nombre(persona: dict | None) -> str:
-    if not persona:
-        return "Cliente SEMAPA"
-    if persona.get("tipo") == "JURIDICA":
-        return persona.get("razon_social") or "Empresa"
-    return f"{persona.get('nombre', '')} {persona.get('apellidos', '')}".strip() or "Cliente"
+def _cliente_nombre(factura: dict) -> str:
+    return factura.get("titular") or "Cliente SEMAPA"
 
 
 # ============================================================================
@@ -161,17 +150,15 @@ def render_medicarta(factura: dict) -> bytes:
     story.append(Paragraph("Factura de consumo de agua potable", styles["Heading4"]))
     story.append(Spacer(1, 6))
 
-    persona = factura.get("persona") or {}
     infra = factura.get("infraestructura") or {}
-    medidor = factura.get("medidor") or {}
 
     tabla_cliente = [
-        ["Cliente:", _cliente_nombre(persona)],
-        ["Documento:", persona.get("documento", "-")],
+        ["Cliente:", _cliente_nombre(factura)],
+        ["Documento:", factura.get("documento", "-")],
         ["Contrato:", str(factura["numero_contrato"])],
-        ["Medidor MAC:", medidor.get("mac", "-")],
+        ["Medidor MAC:", factura.get("mac", "-")],
         ["Dirección:", infra.get("direccion", "-")],
-        ["Distrito / Zona:", f"{medidor.get('distrito_id', '-')} / {medidor.get('zona_id', '-')}"],
+        ["Distrito / Zona:", f"{infra.get('distrito_id', '-')} / {infra.get('zona', '-')}"],
         ["Período:", factura["periodo"]],
         ["Categoría:", factura.get("categoria_tarifa", "-")],
         ["Emitida:", factura.get("fecha_emision").strftime("%Y-%m-%d %H:%M") if factura.get("fecha_emision") else "-"],
@@ -248,7 +235,7 @@ def _draw_medicarta_qr(c: canvas.Canvas, factura: dict) -> None:
 # Formato rollo térmico 80 mm
 # ============================================================================
 def render_rollo(factura: dict) -> bytes:
-    width = 80 * mm
+    width = 55 * mm   # rollo térmico 55 mm (kioscos / tótems)
     # Altura dinámica: 110 mm base + ~6 mm por tramo
     desglose = []
     if factura.get("desglose"):
@@ -269,20 +256,17 @@ def render_rollo(factura: dict) -> bytes:
     c.drawCentredString(width / 2, y, "Servicio Municipal de Agua Potable")
     y -= 6 * mm
 
-    persona = factura.get("persona") or {}
-    medidor = factura.get("medidor") or {}
-
-    c.setFont("Helvetica", 8)
+    c.setFont("Helvetica", 7)
     for label, value in [
-        ("Cliente", _cliente_nombre(persona)[:36]),
-        ("Documento", persona.get("documento", "-")),
+        ("Cliente", _cliente_nombre(factura)[:28]),
+        ("Doc", factura.get("documento", "-")),
         ("Contrato", str(factura["numero_contrato"])),
-        ("MAC medidor", medidor.get("mac", "-")),
+        ("MAC", factura.get("mac", "-")),
         ("Periodo", factura["periodo"]),
-        ("Categoria", factura.get("categoria_tarifa", "-")),
+        ("Cat", factura.get("categoria_tarifa", "-")),
     ]:
-        c.drawString(4 * mm, y, f"{label}:")
-        c.drawRightString(width - 4 * mm, y, str(value))
+        c.drawString(3 * mm, y, f"{label}:")
+        c.drawRightString(width - 3 * mm, y, str(value))
         y -= 4.5 * mm
 
     y -= 2 * mm
@@ -334,7 +318,7 @@ def render_rollo(factura: dict) -> bytes:
 # ============================================================================
 @app.get("/pdf")
 async def generate_pdf(
-    numero_contrato: int,
+    numero_contrato: str,
     periodo: str = Query(pattern=r"^\d{4}-\d{2}$"),
     formato: Literal["rollo", "medicarta"] = "medicarta",
 ):
@@ -346,7 +330,7 @@ async def generate_pdf(
 
 
 class BatchItem(BaseModel):
-    numero_contrato: int
+    numero_contrato: str
     periodo: str
     formato: Literal["rollo", "medicarta"] = "medicarta"
 

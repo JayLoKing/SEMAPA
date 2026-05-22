@@ -1,4 +1,4 @@
-"""Facturación: generación batch + recuperación + PDF redirect."""
+"""Facturación / preavisos: generación batch + recuperación."""
 from __future__ import annotations
 
 import json
@@ -24,8 +24,8 @@ def _load_tarifa_service() -> TarifaService:
 
 
 @router.get("/{numero_contrato}/{periodo}", response_model=FacturaOut)
-async def obtener_factura(numero_contrato: int, periodo: str, _u: dict = Depends(current_user)):
-    rows = list(cassandra_client.execute("factura_get", (numero_contrato, periodo)))
+async def obtener_factura(numero_contrato: str, periodo: str, _u: dict = Depends(current_user)):
+    rows = list(cassandra_client.execute("factura_get", (numero_contrato.upper(), periodo)))
     if not rows:
         raise HTTPException(404, "Factura no encontrada")
     r = rows[0]
@@ -49,7 +49,7 @@ async def generar_facturas(
     limite: int = Query(100, ge=1, le=10000),
     user: dict = Depends(current_user),
 ):
-    """Genera (o regenera) facturas del periodo. Job batch limitado por seguridad."""
+    """Genera (o regenera) preavisos del periodo a partir de las lecturas reales."""
     if user["rol"] not in ("CONTABILIDAD", "ALCALDIA"):
         raise HTTPException(403, "Rol no autorizado")
 
@@ -57,38 +57,47 @@ async def generar_facturas(
     usd = await fetch_usd_bob()
     tipo_cambio = Decimal(str(usd["rate"]))
     now = datetime.utcnow()
-    year, month = (int(x) for x in periodo.split("-"))
-    anio_mes = year * 100 + month
 
     n_ok = 0
-    rows = cassandra_client.execute_raw(
-        "SELECT medidor_id, numero_contrato, infraestructura_id, categoria_tarifa, distrito_id "
-        "FROM medidores WHERE estado='ACTIVO' ALLOW FILTERING LIMIT %s",
-        (limite,),
+    # Recorre contratos activos con medidor; toma consumo del periodo de lecturas.
+    contratos = cassandra_client.execute_raw(
+        "SELECT numero_contrato, medidor_iot, subcategoria, numero_catastro "
+        "FROM contratos LIMIT %s", (limite,), profile="analytics",
     )
-    for med in rows:
-        # Sumar consumo del periodo (litros) → m³
-        lecturas = list(cassandra_client.execute("lecturas_de_medidor",
-                                                  (med["medidor_id"], anio_mes, 200)))
-        litros = sum(int(l.get("consumo_litros") or 0) for l in lecturas)
-        m3 = Decimal(litros) / Decimal(1000)
-        cat = med["categoria_tarifa"] or "R3"
+    for c in contratos:
+        mac = (c.get("medidor_iot") or "").upper()
+        if not mac:
+            continue
+        lecturas = list(cassandra_client.execute("lecturas_de_medidor_periodo", (mac, periodo)))
+        if not lecturas:
+            continue
+        m3 = Decimal(sum(int(l.get("consumo_m3") or 0) for l in lecturas))
+        fpago = next((l.get("fecha_pago") for l in lecturas if l.get("fecha_pago")), None)
+        cat = c.get("subcategoria") or "R3"
         try:
             factura = svc.facturar(cat, m3, tipo_cambio)
         except ValueError:
             continue
 
+        # distrito desde infra
+        distrito_id = 0
+        cat_num = c.get("numero_catastro")
+        if cat_num:
+            infra = list(cassandra_client.execute("infra_get", (cat_num,)))
+            if infra:
+                distrito_id = infra[0].get("distrito_id") or 0
+
+        estado = "PAGADA" if fpago else "PENDIENTE"
         factura_id = uuid.uuid4()
         cassandra_client.execute("factura_put", (
-            med["numero_contrato"], periodo, factura_id,
-            med["medidor_id"], None,
+            c["numero_contrato"], periodo, factura_id, mac,
             factura.consumo_m3, factura.monto_usd, factura.monto_bs,
             tipo_cambio, cat, json.dumps(factura.to_dict()),
-            now, "PENDIENTE",
+            now, fpago, estado,
         ))
         cassandra_client.execute("factura_periodo_put", (
-            periodo, med["distrito_id"], med["numero_contrato"],
-            factura.monto_usd, factura.consumo_m3, cat,
+            periodo, distrito_id, c["numero_contrato"],
+            factura.monto_bs, factura.monto_usd, factura.consumo_m3, cat, estado,
         ))
         n_ok += 1
 

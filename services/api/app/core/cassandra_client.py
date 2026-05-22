@@ -72,35 +72,36 @@ class CassandraClient:
             # auth
             "auth_get_user": ps("SELECT * FROM usuarios_sistema WHERE username = ?"),
             "auth_touch_user": ps("UPDATE usuarios_sistema SET ultimo_acceso = ? WHERE username = ?"),
-            # buscar
-            "find_medidor_by_mac": ps("SELECT * FROM medidores WHERE mac = ?"),
-            "find_medidor_by_contrato": ps("SELECT * FROM medidores WHERE numero_contrato = ?"),
-            "find_medidor_by_serie": ps("SELECT * FROM medidores WHERE numero_serie = ?"),
-            "find_persona_by_doc": ps("SELECT * FROM personas WHERE documento = ?"),
+            # buscar / kiosk (modelo MAC-céntrico)
+            "contrato_get": ps("SELECT * FROM contratos WHERE numero_contrato = ?"),
+            "contrato_por_mac": ps("SELECT * FROM contrato_por_mac WHERE medidor_iot = ?"),
+            "contratos_por_ci": ps("SELECT * FROM contratos_por_ci WHERE ci_titular = ?"),
+            "medidor_get": ps("SELECT * FROM medidores WHERE mac = ?"),
+            "infra_get": ps("SELECT * FROM infraestructuras WHERE numero_catastro = ?"),
+            "medidores_por_zona": ps("SELECT * FROM medidores_por_zona WHERE distrito_id = ?"),
             # tarifas
             "list_tarifas": ps("SELECT * FROM tarifas"),
             # lecturas
             "lecturas_de_medidor": ps(
-                "SELECT * FROM lecturas_por_medidor WHERE medidor_id = ? AND anio_mes = ? LIMIT ?"
+                "SELECT * FROM lecturas_por_medidor WHERE mac = ? LIMIT ?"
             ),
-            "lecturas_zona_fecha": ps(
-                "SELECT * FROM lecturas_por_zona_dia WHERE distrito_id = ? AND zona_id = ? AND fecha = ?"
+            "lecturas_de_medidor_periodo": ps(
+                "SELECT * FROM lecturas_por_medidor WHERE mac = ? AND periodo = ?"
+            ),
+            "lectura_manual_put": ps(
+                "INSERT INTO lecturas_manuales (mac, fecha_hora, usuario, lectura_actual, "
+                "lat, lon, foto_url) VALUES (?, ?, ?, ?, ?, ?, ?)"
             ),
             # facturas
             "factura_get": ps("SELECT * FROM facturas WHERE numero_contrato = ? AND periodo = ?"),
             "factura_put": ps(
-                "INSERT INTO facturas (numero_contrato, periodo, factura_id, medidor_id, persona_id, "
+                "INSERT INTO facturas (numero_contrato, periodo, factura_id, mac, "
                 "consumo_m3, monto_usd, monto_bs, tipo_cambio, categoria_tarifa, desglose, "
-                "fecha_emision, estado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                "fecha_emision, fecha_pago, estado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             ),
             "factura_periodo_put": ps(
-                "INSERT INTO facturas_por_periodo (periodo, distrito_id, numero_contrato, monto_usd, "
-                "consumo_m3, categoria_tarifa) VALUES (?, ?, ?, ?, ?, ?)"
-            ),
-            # lecturas manuales (app móvil)
-            "lectura_manual_put": ps(
-                "INSERT INTO lecturas_manuales (medidor_id, fecha_hora, usuario, lectura_litros, "
-                "lat, lon, foto_url) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                "INSERT INTO facturas_por_periodo (periodo, distrito_id, numero_contrato, monto_bs, "
+                "monto_usd, consumo_m3, categoria_tarifa, estado) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
             ),
         })
         logger.info(f"Prepared statements compilados: {len(self.prepared)}")

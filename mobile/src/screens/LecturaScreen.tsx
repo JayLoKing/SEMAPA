@@ -25,7 +25,7 @@ export default function LecturaScreen({ route, navigation }: any) {
       }
       await api.post("/lecturas/manual", {
         mac: medidor?.mac,
-        lectura_litros: parseInt(lectura, 10),
+        lectura_actual: parseInt(lectura, 10),
         lat,
         lon,
       });
@@ -44,7 +44,7 @@ export default function LecturaScreen({ route, navigation }: any) {
       <Text style={styles.value}>{medidor?.label || "—"}</Text>
       <Text style={styles.value}>MAC: {medidor?.mac}</Text>
 
-      <Text style={[styles.label, { marginTop: 24 }]}>Lectura (litros):</Text>
+      <Text style={[styles.label, { marginTop: 24 }]}>Lectura actual (m³):</Text>
       <TextInput
         style={styles.in}
         keyboardType="number-pad"

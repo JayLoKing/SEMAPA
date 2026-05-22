@@ -76,61 +76,40 @@ def connect_cassandra():
     raise RuntimeError("Cassandra no disponible")
 
 
+# Data real no incluye email → destinatario de prueba (Mailtrap)
+NOTIFY_TEST_EMAIL = os.getenv("NOTIFY_TEST_EMAIL", "")
+
+
 # --------------------- lookups ---------------------
-def resolve_contrato(session, identificador: str, valor: str) -> int | None:
+def resolve_contrato(session, identificador: str, valor: str):
+    """Devuelve (numero_contrato CT-xxx, titular)."""
     if identificador == "contrato":
-        return int(valor)
+        nc = valor.strip().upper()
+        rows = list(session.execute("SELECT titular_contrato FROM contratos WHERE numero_contrato = %s", (nc,)))
+        return (nc, rows[0]["titular_contrato"] if rows else "Cliente")
     if identificador == "mac":
-        rows = list(session.execute("SELECT numero_contrato FROM medidores WHERE mac = %s", (valor.upper(),)))
-        return rows[0]["numero_contrato"] if rows else None
+        rows = list(session.execute(
+            "SELECT numero_contrato, titular_contrato FROM contrato_por_mac WHERE medidor_iot = %s",
+            (valor.upper(),)))
+        if rows:
+            return (rows[0]["numero_contrato"], rows[0].get("titular_contrato") or "Cliente")
     if identificador == "carnet":
-        rows = list(session.execute("SELECT persona_id FROM personas WHERE documento = %s", (valor,)))
-        if not rows:
-            return None
-        infras = list(session.execute(
-            "SELECT infraestructura_id FROM infraestructuras WHERE persona_id = %s",
-            (rows[0]["persona_id"],),
-        ))
-        for inf in infras:
-            meds = list(session.execute(
-                "SELECT numero_contrato FROM medidores WHERE infraestructura_id = %s ALLOW FILTERING",
-                (inf["infraestructura_id"],),
-            ))
-            if meds:
-                return meds[0]["numero_contrato"]
-    return None
+        for ci in {valor, f"{valor} CBBA", valor.split()[0] if valor.split() else valor}:
+            rows = list(session.execute(
+                "SELECT numero_contrato FROM contratos_por_ci WHERE ci_titular = %s", (ci,)))
+            if rows:
+                nc = rows[0]["numero_contrato"]
+                t = list(session.execute("SELECT titular_contrato FROM contratos WHERE numero_contrato = %s", (nc,)))
+                return (nc, t[0]["titular_contrato"] if t else "Cliente")
+    return (None, None)
 
 
-def load_factura(session, numero_contrato: int, periodo: str) -> dict | None:
+def load_factura(session, numero_contrato: str, periodo: str) -> dict | None:
     rows = list(session.execute(
         "SELECT * FROM facturas WHERE numero_contrato = %s AND periodo = %s",
         (numero_contrato, periodo),
     ))
     return rows[0] if rows else None
-
-
-def load_persona_email(session, numero_contrato: int) -> tuple[str | None, str | None]:
-    meds = list(session.execute(
-        "SELECT infraestructura_id FROM medidores WHERE numero_contrato = %s",
-        (numero_contrato,),
-    ))
-    if not meds:
-        return None, None
-    infs = list(session.execute(
-        "SELECT persona_id FROM infraestructuras WHERE infraestructura_id = %s",
-        (meds[0]["infraestructura_id"],),
-    ))
-    if not infs:
-        return None, None
-    pers = list(session.execute(
-        "SELECT email, apellidos, razon_social, tipo FROM personas WHERE persona_id = %s",
-        (infs[0]["persona_id"],),
-    ))
-    if not pers:
-        return None, None
-    p = pers[0]
-    apellido = p.get("razon_social") if p.get("tipo") == "JURIDICA" else p.get("apellidos")
-    return p.get("email"), apellido or "Cliente"
 
 
 # --------------------- PDFs ---------------------
@@ -203,19 +182,19 @@ def send_email(to: str, subject: str, body: str, attachments: list[tuple[str, by
 
 # --------------------- Handler ---------------------
 def handle(session, message: dict):
-    contrato = resolve_contrato(session, message["identificador"], message["valor"])
+    contrato, apellido = resolve_contrato(session, message["identificador"], message["valor"])
     if not contrato:
         raise ValueError(f"Contrato no resuelto: {message}")
     periodo = message["periodo"]
     factura = load_factura(session, contrato, periodo)
     if not factura:
-        raise ValueError(f"Factura no encontrada: {contrato} {periodo}")
-    email, apellido = load_persona_email(session, contrato)
+        raise ValueError(f"Factura no encontrada: {contrato} {periodo} (genera con /facturas/generar)")
+    email = NOTIFY_TEST_EMAIL
     if not email:
-        raise ValueError(f"Email no encontrado para contrato {contrato}")
+        raise ValueError("Sin email destino (configura NOTIFY_TEST_EMAIL)")
 
     body = (
-        f"Sr. {apellido}, SEMAPA le recuerda que su recibo de consumo de agua es de "
+        f"Sr(a). {apellido}, SEMAPA le recuerda que su recibo de consumo de agua es de "
         f"Bs {factura['monto_bs']}. Por el período {periodo} usted consumió "
         f"{factura['consumo_m3']} m³ de agua."
     )
