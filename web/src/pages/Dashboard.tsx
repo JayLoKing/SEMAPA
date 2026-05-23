@@ -149,11 +149,20 @@ function Gerencia({ data }: { data: any }) {
   const modeloData = Object.entries(modelos).map(([k, v]) => ({ modelo: `M${k}`, medidores: v as number }));
   const top10 = (data?.top10_zonas_consumo || []).map((z: any) => ({ zona: z.zona, consumo: z.consumo_m3 }));
 
+  // Lecturas app móvil — listado
+  const { data: lectMov } = useQuery({
+    queryKey: ["lecturas-manuales"],
+    queryFn: async () => (await api.get("/lecturas/manuales/recientes?limite=50")).data,
+    refetchInterval: 30000,
+  });
+
   return (
     <>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-3 gap-4">
         <Kpi label="Consumo acumulado" value={`${data?.consumo_acumulado_m3?.toLocaleString()} m³`} />
         <Kpi label="Mantenimiento" value={data?.medidores_mantenimiento?.toLocaleString()} accent="text-yellow-600" />
+        <Kpi label="Lecturas app móvil" value={data?.lecturas_app_movil?.toLocaleString() || "0"}
+             hint="Registradas por inspectores en campo" accent="text-cyan-600" />
       </div>
       <div className="grid grid-cols-2 gap-4">
         <Card title="Top 10 zonas por consumo">
@@ -175,6 +184,38 @@ function Gerencia({ data }: { data: any }) {
           </ResponsiveContainer>
         </Card>
       </div>
+
+      <Card title={`📱 Lecturas registradas por app móvil (${lectMov?.total || 0})`}>
+        <div className="max-h-96 overflow-y-auto">
+          <table className="w-full text-xs">
+            <thead className="bg-slate-100 dark:bg-slate-700 sticky top-0">
+              <tr>
+                <th className="text-left p-2">Fecha/Hora</th>
+                <th className="text-left p-2">MAC medidor</th>
+                <th className="text-left p-2">Usuario</th>
+                <th className="text-right p-2">Lectura (m³)</th>
+                <th className="text-center p-2">GPS</th>
+                <th className="text-center p-2">Foto</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(lectMov?.lecturas || []).map((l: any, i: number) => (
+                <tr key={i} className="border-t hover:bg-slate-50 dark:hover:bg-slate-700/50">
+                  <td className="p-2 font-mono">{l.fecha_hora?.replace("T", " ").slice(0, 16) || "—"}</td>
+                  <td className="p-2 font-mono text-blue-700 dark:text-blue-400">{l.mac}</td>
+                  <td className="p-2">{l.usuario}</td>
+                  <td className="p-2 text-right font-mono">{l.lectura_actual?.toLocaleString()}</td>
+                  <td className="p-2 text-center">{l.lat ? `📍 ${l.lat.toFixed(4)},${l.lon.toFixed(4)}` : "—"}</td>
+                  <td className="p-2 text-center">{l.tiene_foto ? "📷" : "—"}</td>
+                </tr>
+              ))}
+              {(!lectMov?.lecturas || lectMov.lecturas.length === 0) && (
+                <tr><td colSpan={6} className="text-center text-slate-400 p-4">Sin lecturas móviles aún.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
     </>
   );
 }

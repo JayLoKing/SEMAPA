@@ -21,6 +21,8 @@ from pydantic import BaseModel
 from app.core.cassandra_client import cassandra_client
 from app.core.config import settings
 from app.core.redis_client import redis_client
+from app.services.tarifa_service import TarifaService, tarifas_desde_filas
+from app.services.usd_service import fetch_usd_bob
 
 
 router = APIRouter()
@@ -189,12 +191,76 @@ class ContactoIn(BaseModel):
     email: str | None = None
 
 
+async def _ensure_factura(nc: str, periodo: str) -> Decimal:
+    """Genera factura on-the-fly si no existe. Retorna monto_bs final."""
+    rows = list(cassandra_client.execute("factura_get", (nc, periodo)))
+    if rows:
+        return Decimal(str(rows[0]["monto_bs"]))
+
+    # Resuelve contrato → mac + categoria + catastro
+    crows = list(cassandra_client.execute("contrato_get", (nc,)))
+    if not crows:
+        raise HTTPException(404, f"Contrato {nc} no existe")
+    c = crows[0]
+    mac = (c.get("medidor_iot") or "").upper()
+    cat = c.get("subcategoria") or "R3"
+    cat_num = c.get("numero_catastro")
+    if not mac:
+        raise HTTPException(400, f"Contrato {nc} sin medidor")
+
+    # Consumo del periodo
+    lrows = list(cassandra_client.execute("lecturas_de_medidor_periodo", (mac, periodo)))
+    m3 = Decimal(sum(int(r.get("consumo_m3") or 0) for r in lrows))
+    if m3 <= 0:
+        # fallback: promedio últimos 6 meses
+        last = list(cassandra_client.execute("lecturas_de_medidor", (mac, 6)))
+        if last:
+            tot = sum(int(r.get("consumo_m3") or 0) for r in last if (r.get("consumo_m3") or 0) > 0)
+            m3 = Decimal(max(1, tot // max(1, len(last))))
+        else:
+            m3 = Decimal("15")  # mínimo razonable
+
+    # Tarifa + cálculo
+    trows = list(cassandra_client.execute("list_tarifas"))
+    svc = TarifaService(tarifas_desde_filas(trows))
+    usd = await fetch_usd_bob()
+    tc = Decimal(str(usd["rate"]))
+    try:
+        f = svc.facturar(cat, m3, tc)
+    except ValueError:
+        f = svc.facturar("R3", m3, tc)
+
+    # Distrito desde infra
+    distrito_id = 0
+    if cat_num:
+        irows = list(cassandra_client.execute("infra_get", (cat_num,)))
+        if irows:
+            distrito_id = irows[0].get("distrito_id") or 0
+
+    now = datetime.utcnow()
+    cassandra_client.execute("factura_put", (
+        nc, periodo, uuid.uuid4(), mac,
+        f.consumo_m3, f.monto_usd, f.monto_bs,
+        tc, cat, json.dumps(f.to_dict()),
+        now, None, "PENDIENTE",
+    ))
+    cassandra_client.execute("factura_periodo_put", (
+        periodo, distrito_id, nc,
+        f.monto_bs, f.monto_usd, f.consumo_m3, cat, "PENDIENTE",
+    ))
+    logger.info(f"Factura auto-generada: {nc}/{periodo} Bs {f.monto_bs}")
+    return f.monto_bs
+
+
 @router.post("/pago")
 async def pago_qr(body: PagoIn):
-    """Pago QR simulado: marca la factura como PAGADA y registra el pago."""
+    """Pago QR simulado: auto-genera factura si falta, marca PAGADA, dispara notify."""
     nc = body.numero_contrato.upper()
     now = datetime.utcnow()
-    monto = Decimal(str(body.monto_bs)) if body.monto_bs is not None else Decimal("0")
+
+    monto_final = await _ensure_factura(nc, body.periodo)
+    monto = Decimal(str(body.monto_bs)) if body.monto_bs is not None else monto_final
+
     cassandra_client.execute_raw(
         "INSERT INTO pagos (numero_contrato, periodo, pago_id, monto_bs, metodo, pagado_en) "
         "VALUES (%s, %s, %s, %s, %s, %s)",
@@ -227,6 +293,20 @@ async def crear_reclamo(body: ReclamoIn):
         (nc, rid, body.tipo.upper(), body.descripcion, now, "ABIERTO"),
     )
     return {"ok": True, "reclamo_id": str(rid), "tipo": body.tipo.upper(), "estado": "ABIERTO"}
+
+
+class GenIn(BaseModel):
+    numero_contrato: str
+    periodo: str
+
+
+@router.post("/factura")
+async def generar_factura_publica(body: GenIn):
+    """Genera (si falta) la factura del periodo. Pública — útil para PDF/preavisos."""
+    nc = body.numero_contrato.upper()
+    monto_bs = await _ensure_factura(nc, body.periodo)
+    return {"ok": True, "numero_contrato": nc, "periodo": body.periodo,
+            "monto_bs": str(monto_bs)}
 
 
 @router.post("/contacto")

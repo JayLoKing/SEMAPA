@@ -6,7 +6,7 @@ import { Droplet } from "lucide-react";
 
 export default function Login() {
   const [username, setU] = useState("alcaldia");
-  const [password, setP] = useState("Alcaldia2025!");
+  const [password, setP] = useState("alcaldia123");
   const [err, setErr] = useState("");
   const navigate = useNavigate();
   const login = useAuthStore((s) => s.login);

@@ -34,7 +34,7 @@ const CONSULTAS: Consulta[] = [
     filtros: [{ key: "distritos", tipo: "text", label: "Distritos (csv)", def: "1,3,5" }],
     transform: (d) => ({ kind: "bar", data: d, x: "periodo", y: "consumo_m3", yLabel: "m³" }) },
   { slug: "consumos-excesivos", label: "3. Consumos excesivos",
-    filtros: [{ key: "umbral_m3", tipo: "number", label: "Umbral m³", def: 150 }],
+    filtros: [{ key: "umbral_m3", tipo: "number", label: "Umbral m³", def: 50 }],
     transform: (d) => ({ kind: "bar", data: (d || []).slice(0, 15).map((r: any) => ({ mac: r.mac.slice(0, 8), consumo_m3: r.consumo_m3 })), x: "mac", y: "consumo_m3", yLabel: "m³" }) },
   { slug: "medidores-activos", label: "4. Medidores por estado",
     transform: (d) => ({ kind: "pie", data: objPie(d.por_estado) }) },

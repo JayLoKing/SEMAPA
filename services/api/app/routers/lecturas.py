@@ -49,6 +49,31 @@ async def lectura_manual(body: LecturaManualIn, user: dict = Depends(current_use
     return {"ok": True, "mac": mac, "consumo_m3": consumo, "timestamp": ts.isoformat()}
 
 
+@router.get("/manuales/recientes")
+async def lecturas_manuales_recientes(
+    limite: int = 100,
+    _u: dict = Depends(current_user),
+):
+    """Últimas lecturas registradas desde la app móvil (auditable por Gerencia)."""
+    rows = list(cassandra_client.execute_raw(
+        f"SELECT mac, fecha_hora, usuario, lectura_actual, lat, lon, foto_url "
+        f"FROM lecturas_manuales LIMIT {int(limite)}", profile="analytics"))
+    rows.sort(key=lambda r: r.get("fecha_hora") or datetime.min, reverse=True)
+    out = []
+    for r in rows[:limite]:
+        out.append({
+            "mac": r.get("mac"),
+            "fecha_hora": r["fecha_hora"].isoformat() if r.get("fecha_hora") else None,
+            "usuario": r.get("usuario"),
+            "lectura_actual": r.get("lectura_actual"),
+            "lat": r.get("lat"),
+            "lon": r.get("lon"),
+            "tiene_foto": bool(r.get("foto_url")),
+            "foto_url": r.get("foto_url"),
+        })
+    return {"total": len(out), "lecturas": out}
+
+
 @router.get("/{mac}")
 async def lecturas_por_medidor(mac: str, limite: int = 50, _u: dict = Depends(current_user)):
     """Historial de lecturas de un medidor (por MAC)."""

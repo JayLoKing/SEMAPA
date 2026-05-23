@@ -93,7 +93,7 @@ async def comparativa_semanas(distritos: str = Query("1,3,5"), _u: dict = Depend
 # 3. Consumos excesivos (>150 m³ acumulado en el periodo)
 # ----------------------------------------------------------------------------
 @router.get("/consumos-excesivos")
-async def consumos_excesivos(umbral_m3: int = 150, _u: dict = Depends(current_user)):
+async def consumos_excesivos(umbral_m3: int = 50, _u: dict = Depends(current_user)):
     def _q():
         agg: dict[str, int] = defaultdict(int)
         rows = cassandra_client.execute_raw(
@@ -205,7 +205,7 @@ async def zonas_anomalas(_u: dict = Depends(current_user)):
 async def lecturas_fallidas_mes(limite: int = 5000, _u: dict = Depends(current_user)):
     def _q():
         rows = cassandra_client.execute_raw(
-            f"SELECT status FROM lecturas_por_medidor WHERE status >= 3 ALLOW FILTERING LIMIT {int(limite)}",
+            f"SELECT status FROM lecturas_por_medidor WHERE status >= 3 LIMIT {int(limite)} ALLOW FILTERING",
             profile="analytics",
         )
         c = Counter(r["status"] for r in rows)
@@ -222,7 +222,21 @@ async def medidores_mas_4_anios(_u: dict = Depends(current_user)):
     def _q():
         rows = cassandra_client.execute_raw(
             "SELECT fecha_instalacion FROM medidores", profile="analytics")
-        antiguos = sum(1 for r in rows if r["fecha_instalacion"] and r["fecha_instalacion"] < cutoff)
+        antiguos = 0
+        for r in rows:
+            f = r["fecha_instalacion"]
+            if not f:
+                continue
+            # cassandra.util.Date → datetime.date
+            if hasattr(f, "date"):
+                f = f.date()
+            elif not isinstance(f, date):
+                try:
+                    f = date.fromisoformat(str(f))
+                except Exception:
+                    continue
+            if f < cutoff:
+                antiguos += 1
         return {"total": antiguos, "cutoff": str(cutoff)}
     return await _cached(f"q:antiguos:{cutoff}", _q, ttl=600)
 
@@ -465,7 +479,7 @@ async def horas_pico(limite: int = 20000, _u: dict = Depends(current_user)):
         for r in rows:
             if r["fecha_hora"]:
                 c[r["fecha_hora"].hour] += r["consumo_m3"] or 0
-        return sorted([{"hora": h, "consumo_m3": v} for h, v in c.items()])
+        return sorted([{"hora": h, "consumo_m3": v} for h, v in c.items()], key=lambda x: x["hora"])
     return await _cached("q:pico", _q, ttl=180)
 
 

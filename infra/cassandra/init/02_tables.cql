@@ -309,3 +309,31 @@ CREATE TABLE IF NOT EXISTS usuarios_sistema (
     fecha_creacion timestamp,
     ultimo_acceso timestamp
 );
+
+-- ============================================================================
+-- TRACKING PREAVISOS (entregable 2: efectividad canal)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS preavisos_log (
+    fecha date,                     -- partition por día (rebalance)
+    enviado_en timestamp,
+    preaviso_id timeuuid,
+    numero_contrato text,
+    periodo text,
+    canal text,                     -- email | sms | whatsapp
+    estado text,                    -- ENVIADO | FALLO
+    destino text,
+    proveedor_id text,              -- twilio sid / mailtrap msg id
+    error text,
+    PRIMARY KEY ((fecha), enviado_en, preaviso_id)
+) WITH CLUSTERING ORDER BY (enviado_en DESC, preaviso_id ASC);
+
+CREATE TABLE IF NOT EXISTS lecturas_manuales (
+    mac text,
+    fecha_hora timestamp,
+    usuario text,
+    lectura_actual int,
+    lat double,
+    lon double,
+    foto_url text,
+    PRIMARY KEY ((mac), fecha_hora)
+) WITH CLUSTERING ORDER BY (fecha_hora DESC);

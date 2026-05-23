@@ -21,9 +21,12 @@ import os
 import time
 
 import pika
+import uuid
+from datetime import date, datetime
 from cassandra.auth import PlainTextAuthProvider
 from cassandra.cluster import Cluster
 from cassandra.query import dict_factory
+from cassandra.util import uuid_from_time
 from loguru import logger
 from twilio.rest import Client as TwilioClient
 
@@ -120,12 +123,25 @@ def _normalize_phone_e164(tel: str) -> str:
     return f"+{tel}" if tel.isdigit() else tel
 
 
-def send_whatsapp_twilio(tel: str, body: str, content_vars: dict | None = None):
+def log_preaviso(session, contrato, periodo, canal, estado, destino, prov_id="", error=""):
+    try:
+        now = datetime.utcnow()
+        session.execute(
+            "INSERT INTO preavisos_log (fecha, enviado_en, preaviso_id, numero_contrato, "
+            "periodo, canal, estado, destino, proveedor_id, error) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (date.today(), now, uuid_from_time(now), contrato or "?", periodo or "?",
+             canal, estado, destino or "", prov_id, error[:200])
+        )
+    except Exception as e:
+        logger.warning(f"log_preaviso fallo: {e}")
+
+
+def send_whatsapp_twilio(tel: str, body: str, content_vars: dict | None = None) -> str:
     if _twilio is None:
         raise RuntimeError("Twilio no configurado")
     to = f"whatsapp:{_normalize_phone_e164(tel)}"
     kwargs: dict = {"from_": TWILIO_WA_FROM, "to": to}
-    # Si hay template, usar content_sid (mandatorio fuera de ventana 24h).
     if TWILIO_WA_TEMPLATE and content_vars is not None:
         kwargs["content_sid"] = TWILIO_WA_TEMPLATE
         kwargs["content_variables"] = json.dumps(content_vars)
@@ -133,32 +149,40 @@ def send_whatsapp_twilio(tel: str, body: str, content_vars: dict | None = None):
         kwargs["body"] = body
     msg = _twilio.messages.create(**kwargs)
     logger.info(f"💬 WhatsApp Twilio sid={msg.sid} → {to}")
+    return msg.sid
 
 
-def send_whatsapp_mock(tel: str, body: str):
+def send_whatsapp_mock(tel: str, body: str) -> str:
     logger.info(f"💬 [MOCK] WhatsApp → {tel}: {body}")
+    return f"mock-{uuid.uuid4().hex[:12]}"
 
 
-def send_whatsapp(tel: str, body: str, content_vars: dict | None = None):
+def send_whatsapp(tel: str, body: str, content_vars: dict | None = None) -> str:
     if WHATSAPP_PROVIDER == "twilio":
-        send_whatsapp_twilio(tel, body, content_vars)
-    else:
-        send_whatsapp_mock(tel, body)
+        return send_whatsapp_twilio(tel, body, content_vars)
+    return send_whatsapp_mock(tel, body)
 
 
 def handle(session, msg: dict):
     contrato, titular = resolve(session, msg["identificador"], msg["valor"])
+    periodo = msg.get("periodo", "?")
     if not contrato:
+        log_preaviso(session, None, periodo, "whatsapp", "FALLO", "", error="contrato no resuelto")
         raise ValueError(f"Contrato no resuelto: {msg}")
-    data = load_data(session, contrato, titular, msg["periodo"])
+    data = load_data(session, contrato, titular, periodo)
     if not data or not data["tel"]:
+        log_preaviso(session, contrato, periodo, "whatsapp", "FALLO", "", error="sin telefono")
         raise ValueError("Sin teléfono destino (configura NOTIFY_TEST_PHONE)")
-    body = (f"SEMAPA — Hola Sr(a). {data['apellido']}. Recibo {msg['periodo']}: "
+    body = (f"SEMAPA — Hola Sr(a). {data['apellido']}. Recibo {periodo}: "
             f"Bs {data['f']['monto_bs']}. Consumo {data['f']['consumo_m3']} m³. "
             f"Gracias por su pago puntual.")
-    # Variables del template demo Twilio (HXb5b... = "Your appointment is on {{1}} at {{2}}")
-    content_vars = {"1": msg["periodo"], "2": f"Bs {data['f']['monto_bs']}"}
-    send_whatsapp(data["tel"], body, content_vars=content_vars)
+    content_vars = {"1": periodo, "2": f"Bs {data['f']['monto_bs']}"}
+    try:
+        sid = send_whatsapp(data["tel"], body, content_vars=content_vars)
+        log_preaviso(session, contrato, periodo, "whatsapp", "ENVIADO", data["tel"], sid)
+    except Exception as e:
+        log_preaviso(session, contrato, periodo, "whatsapp", "FALLO", data["tel"], error=str(e))
+        raise
 
 
 def main():

@@ -20,9 +20,12 @@ import os
 import time
 
 import pika
+import uuid
+from datetime import date, datetime
 from cassandra.auth import PlainTextAuthProvider
 from cassandra.cluster import Cluster
 from cassandra.query import dict_factory
+from cassandra.util import uuid_from_time
 from loguru import logger
 from twilio.rest import Client as TwilioClient
 
@@ -124,7 +127,22 @@ def _normalize_phone_e164(tel: str) -> str:
     return f"+{tel}" if tel.isdigit() else tel
 
 
-def send_sms_twilio(telefono: str, body: str):
+def log_preaviso(session, contrato, periodo, canal, estado, destino, prov_id="", error=""):
+    """Registra cada envío en preavisos_log para dashboard de efectividad."""
+    try:
+        now = datetime.utcnow()
+        session.execute(
+            "INSERT INTO preavisos_log (fecha, enviado_en, preaviso_id, numero_contrato, "
+            "periodo, canal, estado, destino, proveedor_id, error) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (date.today(), now, uuid_from_time(now), contrato or "?", periodo or "?",
+             canal, estado, destino or "", prov_id, error[:200])
+        )
+    except Exception as e:
+        logger.warning(f"log_preaviso fallo: {e}")
+
+
+def send_sms_twilio(telefono: str, body: str) -> str:
     if _twilio is None:
         raise RuntimeError("Twilio no configurado (revisa TWILIO_ACCOUNT_SID / AUTH_TOKEN)")
     to = _normalize_phone_e164(telefono)
@@ -137,31 +155,41 @@ def send_sms_twilio(telefono: str, body: str):
         raise RuntimeError("Falta TWILIO_MESSAGING_SERVICE_SID o TWILIO_SMS_FROM")
     msg = _twilio.messages.create(**kwargs)
     logger.info(f"📱 SMS Twilio sid={msg.sid} → {to}: {body[:60]}...")
+    return msg.sid
 
 
-def send_sms_mock(telefono: str, body: str):
+def send_sms_mock(telefono: str, body: str) -> str:
     logger.info(f"📱 [MOCK] SMS → {telefono}: {body}")
+    return f"mock-{uuid.uuid4().hex[:12]}"
 
 
-def send_sms(telefono: str, body: str):
+def send_sms(telefono: str, body: str) -> str:
     if SMS_PROVIDER == "twilio":
-        send_sms_twilio(telefono, body)
-    else:
-        send_sms_mock(telefono, body)
+        return send_sms_twilio(telefono, body)
+    return send_sms_mock(telefono, body)
 
 
 def handle(session, message: dict):
     contrato, titular = resolve_contrato(session, message["identificador"], message["valor"])
+    periodo = message.get("periodo", "?")
     if not contrato:
+        log_preaviso(session, None, periodo, "sms", "FALLO", "", error="contrato no resuelto")
         raise ValueError(f"Contrato no resuelto: {message}")
-    data = load_data(session, contrato, titular, message["periodo"])
+    data = load_data(session, contrato, titular, periodo)
     if not data:
+        log_preaviso(session, contrato, periodo, "sms", "FALLO", "", error="sin datos")
         raise ValueError(f"Datos no encontrados: {contrato}")
     if not data["telefono"]:
+        log_preaviso(session, contrato, periodo, "sms", "FALLO", "", error="sin telefono")
         raise ValueError("Sin teléfono destino (configura NOTIFY_TEST_PHONE)")
-    body = (f"SEMAPA: Sr(a). {data['apellido']} su preaviso {message['periodo']} es "
+    body = (f"SEMAPA: Sr(a). {data['apellido']} su preaviso {periodo} es "
             f"Bs {data['factura']['monto_bs']}. Consumo {data['factura']['consumo_m3']} m³.")
-    send_sms(data["telefono"], body)
+    try:
+        sid = send_sms(data["telefono"], body)
+        log_preaviso(session, contrato, periodo, "sms", "ENVIADO", data["telefono"], sid)
+    except Exception as e:
+        log_preaviso(session, contrato, periodo, "sms", "FALLO", data["telefono"], error=str(e))
+        raise
 
 
 def main():

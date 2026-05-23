@@ -105,18 +105,111 @@ async def distritos_geo(_u: dict = Depends(current_user)):
     return out
 
 
+def _uso_suelo_for_catastro_cache():
+    """Devuelve dict {numero_catastro: uso_suelo} para filtrar medidores.
+
+    Cache 5min. Costo: 1 scan completo de infraestructuras.
+    """
+    return None  # placeholder — usamos cache Redis abajo
+
+
+async def _load_uso_suelo_map() -> dict[str, str]:
+    cache = await redis_client.get("mapa:catastro_uso_suelo")
+    if cache:
+        return json.loads(cache)
+    m: dict[str, str] = {}
+    for r in cassandra_client.execute_raw(
+        "SELECT numero_catastro, uso_suelo FROM infraestructuras", profile="analytics"):
+        if r.get("numero_catastro"):
+            m[r["numero_catastro"]] = (r.get("uso_suelo") or "").strip()
+    await redis_client.set("mapa:catastro_uso_suelo", json.dumps(m), ttl_seconds=600)
+    return m
+
+
+@router.get("/usos-suelo")
+async def usos_suelo(_u: dict = Depends(current_user)):
+    """Catálogo distinct de uso_suelo (para combobox del filtro)."""
+    cache = await redis_client.get("mapa:usos_suelo")
+    if cache:
+        return json.loads(cache)
+    vals: set[str] = set()
+    for r in cassandra_client.execute_raw(
+        "SELECT uso_suelo FROM infraestructuras", profile="analytics"):
+        u = (r.get("uso_suelo") or "").strip()
+        if u:
+            vals.add(u)
+    out = sorted(vals)
+    await redis_client.set("mapa:usos_suelo", json.dumps(out), ttl_seconds=900)
+    return out
+
+
+@router.get("/distrito/{distrito_id}/zonas")
+async def zonas_distrito(distrito_id: int, _u: dict = Depends(current_user)):
+    """Lista zonas de un distrito con count de medidores + consumo total."""
+    cache_key = f"mapa:zonas_distrito:{distrito_id}"
+    cached = await redis_client.get(cache_key)
+    if cached:
+        return json.loads(cached)
+    rows = list(cassandra_client.execute("medidores_por_zona", (distrito_id,)))
+    agg: dict[str, dict] = {}
+    for r in rows:
+        z = (r.get("zona") or "").strip()
+        if not z:
+            continue
+        a = agg.setdefault(z, {"zona": z, "medidores": 0, "consumo_m3": 0})
+        a["medidores"] += 1
+
+    # Consumo por zona
+    for r in cassandra_client.execute_raw(
+        f"SELECT zona, consumo_m3 FROM lecturas_por_zona_periodo WHERE distrito_id={int(distrito_id)} ALLOW FILTERING",
+        profile="analytics"):
+        z = (r.get("zona") or "").strip()
+        if z in agg:
+            agg[z]["consumo_m3"] += r.get("consumo_m3") or 0
+
+    out = sorted(agg.values(), key=lambda x: -x["medidores"])
+    await redis_client.set(cache_key, json.dumps(out), ttl_seconds=300)
+    return out
+
+
 @router.get("/distrito/{distrito_id}/medidores")
 async def medidores_distrito(
     distrito_id: int,
+    zona: str | None = Query(None, description="Filtrar por zona exacta"),
+    uso_suelo: str | None = Query(None, description="Filtrar por uso de suelo"),
     limite: int = Query(2000, ge=1, le=20000),
     _u: dict = Depends(current_user),
 ):
-    """Medidores de un distrito con coordenadas para pintar en el mapa."""
+    """Medidores de un distrito (opcionalmente filtrados por zona + uso_suelo)."""
     rows = list(cassandra_client.execute("medidores_por_zona", (distrito_id,)))
+
+    uso_map: dict[str, str] = {}
+    mac_catastro: dict[str, str] = {}
+    if uso_suelo:
+        uso_map = await _load_uso_suelo_map()
+        # Build mac → catastro map for this distrito (single scan)
+        cache_key = f"mapa:mac_catastro:{distrito_id}"
+        cached = await redis_client.get(cache_key)
+        if cached:
+            mac_catastro = json.loads(cached)
+        else:
+            for r in cassandra_client.execute_raw(
+                f"SELECT mac, numero_catastro FROM medidores WHERE distrito_id={int(distrito_id)} ALLOW FILTERING",
+                profile="analytics"):
+                if r.get("mac") and r.get("numero_catastro"):
+                    mac_catastro[r["mac"]] = r["numero_catastro"]
+            await redis_client.set(cache_key, json.dumps(mac_catastro), ttl_seconds=600)
+
     out = []
-    for r in rows[:limite]:
+    for r in rows:
         if r.get("latitud") is None or r.get("longitud") is None:
             continue
+        if zona and (r.get("zona") or "").strip() != zona.strip():
+            continue
+        if uso_suelo:
+            cat = mac_catastro.get(r["mac"])
+            if not cat or uso_map.get(cat, "") != uso_suelo:
+                continue
         out.append({
             "mac": r["mac"],
             "numero_contrato": r.get("numero_contrato"),
@@ -129,7 +222,22 @@ async def medidores_distrito(
             "lat": r["latitud"],
             "lon": r["longitud"],
         })
-    return {"distrito_id": distrito_id, "total": len(out), "medidores": out}
+        if len(out) >= limite:
+            break
+    return {"distrito_id": distrito_id, "zona": zona, "uso_suelo": uso_suelo,
+            "total": len(out), "medidores": out}
+
+
+@router.get("/zona/{distrito_id}/{zona}/medidores")
+async def medidores_zona(
+    distrito_id: int,
+    zona: str,
+    uso_suelo: str | None = Query(None),
+    limite: int = Query(3000, ge=1, le=10000),
+    _u: dict = Depends(current_user),
+):
+    """Atajo: medidores de una zona específica (con filtro uso_suelo opcional)."""
+    return await medidores_distrito(distrito_id, zona, uso_suelo, limite, _u)
 
 
 @router.get("/medidor/{mac}")

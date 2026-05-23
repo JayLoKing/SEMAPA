@@ -10,7 +10,8 @@
       "bundleIdentifier": "bo.semapa.mobile",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "SEMAPA usa tu ubicación para identificar medidores cercanos.",
-        "NSCameraUsageDescription": "SEMAPA usa la cámara para registrar fotos de las lecturas."
+        "NSCameraUsageDescription": "SEMAPA usa la cámara para registrar fotos de las lecturas.",
+        "NSPhotoLibraryUsageDescription": "SEMAPA accede a la galería para adjuntar foto del medidor."
       }
     },
     "android": {
@@ -18,7 +19,8 @@
       "permissions": [
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
-        "CAMERA"
+        "CAMERA",
+        "READ_EXTERNAL_STORAGE"
       ]
     },
     "plugins": [
@@ -32,6 +34,13 @@
         "expo-camera",
         {
           "cameraPermission": "SEMAPA necesita la cámara para registrar lecturas."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "SEMAPA accede a tus fotos para adjuntar la foto del medidor.",
+          "cameraPermission": "SEMAPA usa la cámara para capturar la foto del medidor."
         }
       ],
       "expo-secure-store",

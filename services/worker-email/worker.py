@@ -22,6 +22,8 @@ import json
 import os
 import smtplib
 import time
+import uuid
+from datetime import date, datetime
 from email.message import EmailMessage
 
 import httpx
@@ -29,6 +31,7 @@ import pika
 from cassandra.auth import PlainTextAuthProvider
 from cassandra.cluster import Cluster
 from cassandra.query import dict_factory
+from cassandra.util import uuid_from_time
 from loguru import logger
 
 
@@ -180,17 +183,35 @@ def send_email(to: str, subject: str, body: str, attachments: list[tuple[str, by
         send_mailhog(to, subject, body, attachments)
 
 
+# --------------------- Tracking ---------------------
+def log_preaviso(session, contrato, periodo, canal, estado, destino, prov_id="", error=""):
+    try:
+        now = datetime.utcnow()
+        session.execute(
+            "INSERT INTO preavisos_log (fecha, enviado_en, preaviso_id, numero_contrato, "
+            "periodo, canal, estado, destino, proveedor_id, error) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (date.today(), now, uuid_from_time(now), contrato or "?", periodo or "?",
+             canal, estado, destino or "", prov_id, error[:200])
+        )
+    except Exception as e:
+        logger.warning(f"log_preaviso fallo: {e}")
+
+
 # --------------------- Handler ---------------------
 def handle(session, message: dict):
     contrato, apellido = resolve_contrato(session, message["identificador"], message["valor"])
+    periodo = message.get("periodo", "?")
     if not contrato:
+        log_preaviso(session, None, periodo, "email", "FALLO", "", error="contrato no resuelto")
         raise ValueError(f"Contrato no resuelto: {message}")
-    periodo = message["periodo"]
     factura = load_factura(session, contrato, periodo)
     if not factura:
+        log_preaviso(session, contrato, periodo, "email", "FALLO", "", error="factura no existe")
         raise ValueError(f"Factura no encontrada: {contrato} {periodo} (genera con /facturas/generar)")
     email = NOTIFY_TEST_EMAIL
     if not email:
+        log_preaviso(session, contrato, periodo, "email", "FALLO", "", error="sin email destino")
         raise ValueError("Sin email destino (configura NOTIFY_TEST_EMAIL)")
 
     body = (
@@ -206,8 +227,14 @@ def handle(session, message: dict):
         (f"factura-{contrato}-{periodo}-rollo.pdf",
          fetch_pdf(contrato, periodo, "rollo")),
     ]
-    send_email(email, subject, body, pdfs)
-    logger.info(f"Email ({EMAIL_PROVIDER}) → {email} ({contrato}/{periodo})")
+    try:
+        send_email(email, subject, body, pdfs)
+        logger.info(f"Email ({EMAIL_PROVIDER}) → {email} ({contrato}/{periodo})")
+        log_preaviso(session, contrato, periodo, "email", "ENVIADO", email,
+                     f"{EMAIL_PROVIDER}-{uuid.uuid4().hex[:8]}")
+    except Exception as e:
+        log_preaviso(session, contrato, periodo, "email", "FALLO", email, error=str(e))
+        raise
 
 
 # --------------------- Main loop ---------------------

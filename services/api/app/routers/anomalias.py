@@ -50,7 +50,7 @@ async def anomalias(
     error_rows = list(
         cassandra_client.execute_raw(
             f"SELECT mac, consumo_m3, fecha_hora, status "
-            f"FROM lecturas_por_medidor WHERE status >= 3 ALLOW FILTERING LIMIT {limite}",
+            f"FROM lecturas_por_medidor WHERE status >= 3 LIMIT {limite} ALLOW FILTERING",
             profile="analytics",
         )
     )
@@ -71,7 +71,7 @@ async def anomalias(
         cassandra_client.execute_raw(
             f"SELECT mac, consumo_m3, fecha_hora, status "
             f"FROM lecturas_por_medidor WHERE consumo_m3 > {umbral_m3} "
-            f"AND status < 3 ALLOW FILTERING LIMIT {limite}",
+            f"AND status < 3 LIMIT {limite} ALLOW FILTERING",
             profile="analytics",
         )
     )
@@ -109,7 +109,7 @@ async def morosos(
     pendientes = list(
         cassandra_client.execute_raw(
             f"SELECT numero_contrato, periodo, monto_bs, estado "
-            f"FROM facturas WHERE estado='PENDIENTE' ALLOW FILTERING LIMIT {limite}",
+            f"FROM facturas WHERE estado='PENDIENTE' LIMIT {limite} ALLOW FILTERING",
             profile="analytics",
         )
     )
