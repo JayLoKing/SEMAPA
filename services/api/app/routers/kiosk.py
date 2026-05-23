@@ -12,15 +12,41 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+import aio_pika
 from cassandra.util import uuid_from_time
 from fastapi import APIRouter, HTTPException
+from loguru import logger
 from pydantic import BaseModel
 
 from app.core.cassandra_client import cassandra_client
+from app.core.config import settings
 from app.core.redis_client import redis_client
 
 
 router = APIRouter()
+
+
+async def _publish_notify(formato: str, contrato: str, periodo: str) -> bool:
+    """Publica un mensaje notify.{formato} en RabbitMQ. True si OK."""
+    try:
+        conn = await aio_pika.connect_robust(
+            host=settings.RABBITMQ_HOST, port=settings.RABBITMQ_PORT,
+            login=settings.RABBITMQ_USER, password=settings.RABBITMQ_PASSWORD,
+            virtualhost=settings.RABBITMQ_VHOST, timeout=5.0,
+        )
+        async with conn:
+            channel = await conn.channel()
+            exch = await channel.declare_exchange("semapa.notifications", aio_pika.ExchangeType.TOPIC, durable=True)
+            body = {"formato": formato, "identificador": "contrato", "valor": contrato, "periodo": periodo}
+            await exch.publish(
+                aio_pika.Message(body=json.dumps(body).encode(),
+                                 content_type="application/json",
+                                 delivery_mode=aio_pika.DeliveryMode.PERSISTENT),
+                routing_key=f"notify.{formato}")
+        return True
+    except Exception as e:
+        logger.warning(f"notify.{formato} no publicado: {e}")
+        return False
 
 
 def _val(v: Any) -> Any:
@@ -179,8 +205,14 @@ async def pago_qr(body: PagoIn):
         (now, nc, body.periodo),
     )
     await redis_client.set(f"kiosk:{nc}", "", ttl_seconds=1)  # invalida cache
+    # Envía comprobante por email/sms/whatsapp (sandbox)
+    canales = []
+    for f in ("email", "sms", "whatsapp"):
+        if await _publish_notify(f, nc, body.periodo):
+            canales.append(f)
     return {"ok": True, "numero_contrato": nc, "periodo": body.periodo,
-            "qr": f"semapa://pago/{nc}/{body.periodo}", "estado": "PAGADA"}
+            "qr": f"semapa://pago/{nc}/{body.periodo}", "estado": "PAGADA",
+            "notificaciones_enviadas": canales}
 
 
 @router.post("/reclamo")

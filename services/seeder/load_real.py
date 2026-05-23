@@ -17,6 +17,7 @@ Uso:
 from __future__ import annotations
 
 import csv
+import json
 import os
 import time
 import uuid
@@ -25,6 +26,7 @@ from decimal import Decimal, InvalidOperation
 
 import bcrypt
 from loguru import logger
+from shapely.geometry import shape, Point
 
 from cassandra_io import bulk_insert, connect
 
@@ -102,6 +104,33 @@ def _fix_text(s):
         return s.encode("latin-1").decode("utf-8")
     except (UnicodeDecodeError, UnicodeEncodeError):
         return s
+
+
+def load_district_polygons():
+    """Carga polígonos de distritos para corregir asignación por geografía."""
+    path = f"{DATA_DIR}/distritos.geojson"
+    if not os.path.exists(path):
+        logger.warning(f"{path} no existe; sin corrección geográfica")
+        return {}
+    with open(path, encoding="utf-8") as f:
+        gj = json.load(f)
+    polys = {ft["properties"]["distrito"]: shape(ft["geometry"]) for ft in gj["features"]}
+    logger.info(f"Polígonos cargados: {sorted(polys.keys())}")
+    return polys
+
+
+_POLYS: dict = {}
+
+
+def real_distrito(lat, lon, fallback):
+    """Devuelve el distrito real (point-in-polygon); cae a fallback si no se halla."""
+    if lat is None or lon is None or not _POLYS:
+        return fallback
+    p = Point(lon, lat)
+    for d, poly in _POLYS.items():
+        if poly.contains(p):
+            return d
+    return fallback
 
 
 def _rows(path):
@@ -190,12 +219,16 @@ def load_infraestructuras(session):
     infra_map: dict[str, tuple] = {}
     rows: list[tuple] = []
     n = 0
+    corregidos = 0
     for r in _rows(f"{DATA_DIR}/infraestructuras.csv"):
         cat = r["numero_catastro"].strip()
-        d = _int(r["distrito"])
+        d_csv = _int(r["distrito"])
         zona = (r["zona"] or "").strip()
         lat = _float(r["latitud"])
         lon = _float(r["longitud"])
+        d = real_distrito(lat, lon, d_csv)
+        if d != d_csv:
+            corregidos += 1
         infra_map[cat] = (d, zona, lat, lon)
         rows.append((
             cat, r["propietario"], r["ci"], r["direccion"], zona, d,
@@ -207,7 +240,7 @@ def load_infraestructuras(session):
             rows.clear()
     if rows:
         n += bulk_insert(session, ps, rows, CONCURRENCY)
-    logger.success(f"Infraestructuras: {n:,} | map={len(infra_map):,}")
+    logger.success(f"Infraestructuras: {n:,} | map={len(infra_map):,} | distritos corregidos por geografía: {corregidos:,}")
     return infra_map
 
 
@@ -387,6 +420,8 @@ def load_usuarios(session):
 # --------------------------------------------------------------------------
 def main():
     t0 = time.time()
+    global _POLYS
+    _POLYS = load_district_polygons()
     cluster, session = connect()
     try:
         zona_gateway = load_catalogos(session)
